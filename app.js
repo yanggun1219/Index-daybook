@@ -1,4 +1,4 @@
-// 지수 관측소 v3.1 — 모바일 인터랙티브 앱 컨트롤러
+// 지수 관측소 v3.2 — 모바일 인터랙티브 앱 컨트롤러 (선물·원자재·글로벌 뉴스 브리핑 지원)
 
 const MARKET_NAMES = {
   KOSPI: '코스피',
@@ -12,7 +12,7 @@ const state = {
   tab: 'forecast',
   dateIdx: -1,
   currentForecast: null,
-  historyV31: null,
+  historyV32: null,
   historyV2: null,
   historyV1: null,
   simValues: [],
@@ -24,6 +24,14 @@ const fmtMove = x =>
   x === null || x === undefined || Number.isNaN(x)
     ? '사례 없음'
     : (x > 0 ? '+' : '') + x.toFixed(2) + '%';
+
+function escapeHtml(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
 
 function showToast(msg, isError) {
   const el = document.getElementById('toast');
@@ -60,7 +68,7 @@ function validateImport(obj) {
 function recomputeMarket(id) {
   state.key = id;
   const rows = state.marketsData[id] || [];
-  state.historyV31 = null;
+  state.historyV32 = null;
   state.historyV2 = null;
   state.historyV1 = null;
 
@@ -109,6 +117,113 @@ function switchTab(tabId) {
   if (tabId === 'backtest') renderBacktest();
 }
 
+function renderFuturesAndNewsSection() {
+  const fut = state.marketsData.FUTURES;
+  const news = state.marketsData.NEWS;
+
+  let html = '';
+  if (fut && typeof fut === 'object') {
+    const items = [
+      { label: '나스닥100 선물', val: fut.NQ_pct, price: fut.NQ },
+      { label: 'S&P500 선물', val: fut.ES_pct, price: fut.ES },
+      { label: 'WTI 유가', val: fut.CL_pct, price: fut.CL },
+      { label: '국제 금', val: fut.GC_pct, price: fut.GC }
+    ].filter(x => Number.isFinite(x.val));
+
+    if (items.length) {
+      html +=
+        '<section class="mt-3 rounded-2xl bg-white border border-slate-200 p-4 shadow-sm">' +
+        '<div class="flex items-center justify-between mb-2">' +
+        '<h2 class="text-sm font-bold text-slate-900">장전 선물 · 원자재 스냅샷</h2>' +
+        '<span class="text-[11px] text-slate-500">' +
+        escapeHtml(fut.updatedKst || '') +
+        '</span>' +
+        '</div>' +
+        '<div class="grid grid-cols-2 gap-2">' +
+        items
+          .map(it => {
+            const pos = it.val >= 0;
+            return (
+              '<div class="rounded-xl bg-slate-50 border border-slate-100 px-3 py-2">' +
+              '<div class="text-[11px] text-slate-500">' +
+              it.label +
+              '</div>' +
+              '<div class="mt-0.5 flex items-baseline justify-between tabular-nums">' +
+              '<span class="text-xs font-semibold text-slate-800">' +
+              (Number.isFinite(it.price) ? it.price.toLocaleString('en-US') : '-') +
+              '</span>' +
+              '<span class="text-xs font-bold ' +
+              (pos ? 'text-teal-700' : 'text-rose-700') +
+              '">' +
+              fmtMove(it.val) +
+              '</span>' +
+              '</div>' +
+              '</div>'
+            );
+          })
+          .join('') +
+        '</div>' +
+        '</section>';
+    }
+  }
+
+  if (news && Array.isArray(news.items) && news.items.length) {
+    const score = Number.isFinite(news.sentiment) ? news.sentiment : 0;
+    const toneClass =
+      score >= 15
+        ? 'bg-teal-50 text-teal-800'
+        : score <= -15
+          ? 'bg-rose-50 text-rose-800'
+          : 'bg-slate-100 text-slate-700';
+    const toneLabel = score >= 15 ? '우호적' : score <= -15 ? '경계·부정' : '중립';
+
+    html +=
+      '<section class="mt-3 rounded-2xl bg-white border border-slate-200 p-4 shadow-sm">' +
+      '<div class="flex items-center justify-between mb-2">' +
+      '<h2 class="text-sm font-bold text-slate-900">글로벌 주요 경제 뉴스</h2>' +
+      '<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold tabular-nums ' +
+      toneClass +
+      '">심리 ' +
+      toneLabel +
+      ' (' +
+      (score > 0 ? '+' : '') +
+      score +
+      ')</span>' +
+      '</div>' +
+      '<ul class="divide-y divide-slate-100 text-xs">' +
+      news.items
+        .slice(0, 5)
+        .map(item => {
+          const safeUrl = /^https?:\/\//.test(item.url || '') ? item.url : '';
+          const titleHtml = safeUrl
+            ? '<a href="' +
+              escapeHtml(safeUrl) +
+              '" target="_blank" rel="noopener noreferrer" class="font-medium text-slate-800 hover:text-teal-700 underline-offset-2 hover:underline">' +
+              escapeHtml(item.title) +
+              '</a>'
+            : '<span class="font-medium text-slate-800">' + escapeHtml(item.title) + '</span>';
+          return (
+            '<li class="py-2 flex items-start justify-between gap-2">' +
+            '<div class="leading-snug">' +
+            titleHtml +
+            (item.source ? '<div class="text-[11px] text-slate-400 mt-0.5">' + escapeHtml(item.source) + '</div>' : '') +
+            '</div>' +
+            '</li>'
+          );
+        })
+        .join('') +
+      '</ul>' +
+      '</section>';
+  } else {
+    html +=
+      '<section class="mt-3 rounded-2xl bg-slate-50 border border-dashed border-slate-300 p-3.5 text-xs text-slate-600">' +
+      '<strong>선물·유가·글로벌 뉴스 대기 중:</strong> GitHub Actions에서 <code class="bg-white px-1 py-0.5 rounded border border-slate-200">Run workflow</code>를 1회 실행하면 나스닥 선물·WTI 유가·금 시세와 최신 글로벌 경제 뉴스 카드가 자동으로 채워집니다.' +
+      '</section>';
+  }
+
+  return html;
+}
+
 function renderForecast() {
   const rows = state.marketsData[state.key] || [];
   const i = state.dateIdx;
@@ -130,22 +245,19 @@ function renderForecast() {
         : 'bg-slate-800 text-slate-200 border border-slate-700';
 
   const guardNotice =
-    f.n < 60 || f.blockedReason
-      ? '<div class="mt-3 rounded-xl bg-amber-50 border border-amber-200 px-3.5 py-2.5 text-xs text-amber-900 leading-relaxed"><strong>과적합 방어 작동:</strong> ' +
-        (f.blockedReason ||
-          '현재 학습 표본이 ' +
-            f.n +
-            '거래일뿐이어서 기준 빈도(' +
-            fmtPct(f.base) +
-            ') 방향으로 보수적으로 수축했습니다.') +
-        ' <span class="text-amber-800">5년 치 데이터(update_data.py)를 연결하면 추가 지표가 자동 활성화됩니다.</span></div>'
+    f.n < 60
+      ? '<div class="mt-3 rounded-xl bg-amber-50 border border-amber-200 px-3.5 py-2.5 text-xs text-amber-900 leading-relaxed"><strong>소표본 방어:</strong> 현재 학습 표본이 ' +
+        f.n +
+        '거래일뿐이어서 기준 빈도(' +
+        fmtPct(f.base) +
+        ') 방향으로 보수적으로 수축했습니다.</div>'
       : '';
 
   const extraSection = f.candidates.length
     ? '<section class="mt-3 rounded-2xl bg-white border border-slate-200 p-4 shadow-sm">' +
       '<div class="flex items-center justify-between mb-1.5">' +
-      '<h2 class="text-sm font-bold text-slate-900">확장 지표 상태</h2>' +
-      '<span class="text-xs text-slate-500">미국장 기준 ' +
+      '<h2 class="text-sm font-bold text-slate-900">확장 지표 상태 (매크로·원자재·수급)</h2>' +
+      '<span class="text-xs text-slate-500">미국장 ' +
       (f.usDate || '미수록') +
       (f.usSessions > 1 ? ' (' + f.usSessions + '일 누적)' : '') +
       '</span>' +
@@ -160,7 +272,7 @@ function renderForecast() {
             ? '<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-teal-50 text-teal-800">모델 반영</span>'
             : hasVal
               ? '<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-amber-50 text-amber-800">표본 대기(60일+)</span>'
-              : '<span class="px-2 py-0.5 rounded-full text-[11px] font-medium bg-slate-100 text-slate-500">미수록</span>';
+              : '<span class="px-2 py-0.5 rounded-full text-[11px] font-medium bg-slate-100 text-slate-500">갱신 대기</span>';
           return (
             '<div class="py-2 flex items-center justify-between gap-2 text-xs">' +
             '<span class="font-medium text-slate-700">' +
@@ -228,7 +340,7 @@ function renderForecast() {
     '<div class="flex items-center justify-between gap-2 flex-wrap">' +
     '<span class="text-xs font-medium text-slate-300">' +
     MARKET_NAMES[state.key] +
-    ' 다음 거래일 상승 확률 (v3.1)</span>' +
+    ' 다음 거래일 상승 확률 (v3.2)</span>' +
     '<div class="flex items-center gap-1.5">' +
     '<span class="text-[11px] px-2 py-0.5 rounded-full ' +
     regimeBadgeClass +
@@ -268,6 +380,7 @@ function renderForecast() {
     '</div>' +
     '</section>' +
     guardNotice +
+    renderFuturesAndNewsSection() +
     '<section class="mt-3 rounded-2xl bg-white border border-slate-200 p-4 shadow-sm">' +
     '<div class="flex items-center justify-between mb-2">' +
     '<h2 class="text-sm font-bold text-slate-900">예상 등락 폭 (변동성 보정 80% 구간)</h2>' +
@@ -503,7 +616,7 @@ function renderSimulator() {
     fmtMove(simOut.high) +
     '</div>' +
     '</div>' +
-    '<p class="mt-2 text-xs text-slate-400">장전 야간 나스닥 누적 등락, 환율, 단기 변동성을 슬라이더로 조정해 방향 확률과 80% 예상 밴드 변화를 즉시 확인합니다.</p>' +
+    '<p class="mt-2 text-xs text-slate-400">장전 야간 나스닥, 환율, 유가·금, 변동성을 슬라이더로 조정해 방향 확률과 80% 예상 밴드 변화를 즉시 확인합니다.</p>' +
     '</section>' +
     '<section class="mt-3 rounded-2xl bg-white border border-slate-200 p-4 shadow-sm">' +
     '<div class="flex items-center justify-between mb-2">' +
@@ -546,9 +659,10 @@ function renderBacktest() {
   const rows = state.marketsData[state.key] || [];
   const i = state.dateIdx;
   const container = document.getElementById('backtest-content');
-  if (!state.historyV31 || !state.historyV2) {
+
+  if (!state.historyV32 || !state.historyV2) {
     const res = buildHistories(rows, state.key, state.marketsData);
-    state.historyV31 = res.enhanced;
+    state.historyV32 = res.enhanced;
     state.historyV2 = res.base;
   }
   if (!state.historyV1) {
@@ -557,23 +671,23 @@ function renderBacktest() {
 
   const pairs = [];
   for (let j = 0; j < i; j++) {
-    const p31 = state.historyV31[j];
+    const p32 = state.historyV32[j];
     const p2 = state.historyV2[j];
     const p1 = state.historyV1[j];
-    if (p31 && p2 && p1 && adjacent(rows[j], rows[j + 1])) {
-      pairs.push({ p31, p2, p1, y: rows[j + 1][2] });
+    if (p32 && p2 && p1 && adjacent(rows[j], rows[j + 1])) {
+      pairs.push({ p32, p2, p1, y: rows[j + 1][2] });
     }
   }
 
   const avg = fn => (pairs.length ? pairs.reduce((s, v) => s + fn(v), 0) / pairs.length : null);
-  const brierV31 = avg(v => (v.p31.p - Number(v.y > 0)) ** 2);
+  const brierV32 = avg(v => (v.p32.p - Number(v.y > 0)) ** 2);
   const brierV2 = avg(v => (v.p2.p - Number(v.y > 0)) ** 2);
   const brierV1 = avg(v => (v.p1.p - Number(v.y > 0)) ** 2);
   const brierBase = avg(v => (v.p2.base - Number(v.y > 0)) ** 2);
-  const covV31 = avg(v => Number(v.y >= v.p31.low && v.y <= v.p31.high));
+  const covV32 = avg(v => Number(v.y >= v.p32.low && v.y <= v.p32.high));
   const covV2 = avg(v => Number(v.y >= v.p2.low && v.y <= v.p2.high));
   const covV1 = avg(v => Number(v.y >= v.p1.low && v.y <= v.p1.high));
-  const activeCount = pairs.filter(v => v.p31.active && v.p31.active.length).length;
+  const activeCount = pairs.filter(v => v.p32.active && v.p32.active.length).length;
 
   const fmtB = x => (x === null ? '-' : x.toFixed(4));
 
@@ -597,14 +711,14 @@ function renderBacktest() {
     '</tr></thead>' +
     '<tbody class="divide-y divide-slate-100 tabular-nums">' +
     '<tr class="bg-teal-50/50 font-semibold text-slate-900">' +
-    '<td class="py-2.5 pr-2">개선 v3.1 (확장 활성 ' +
+    '<td class="py-2.5 pr-2">개선 v3.2 (확장 활성 ' +
     activeCount +
     '회)</td>' +
     '<td class="py-2.5 px-2 text-right text-teal-800">' +
-    fmtB(brierV31) +
+    fmtB(brierV32) +
     '</td>' +
     '<td class="py-2.5 pl-2 text-right text-teal-800">' +
-    fmtPct(covV31) +
+    fmtPct(covV32) +
     '</td>' +
     '</tr>' +
     '<tr class="text-slate-700">' +
@@ -636,7 +750,7 @@ function renderBacktest() {
     '</section>' +
     '<section class="mt-3 rounded-2xl bg-white border border-slate-200 p-4 shadow-sm">' +
     '<h2 class="text-sm font-bold text-slate-900 mb-1.5">최신 데이터 불러오기 (data.js / JSON / CSV)</h2>' +
-    '<p class="text-xs text-slate-600 mb-3"><code class="bg-slate-100 px-1 py-0.5 rounded">update_data.py</code>로 생성한 5년 치 <code class="bg-slate-100 px-1 py-0.5 rounded">data.js</code>나 CSV를 올리면 확장 지표(SOX·수급·VIX·국채금리·DXY)가 자동 활성화됩니다.</p>' +
+    '<p class="text-xs text-slate-600 mb-3"><code class="bg-slate-100 px-1 py-0.5 rounded">update_data.py</code>로 생성한 5년 치 <code class="bg-slate-100 px-1 py-0.5 rounded">data.js</code>를 올리면 유가·금·선물·뉴스까지 자동 반영됩니다.</p>' +
     '<div class="flex flex-wrap items-center gap-2">' +
     '<label class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900 text-white text-xs font-semibold cursor-pointer hover:bg-slate-800 transition">' +
     '<span>파일 선택 (JS/JSON/CSV)</span>' +
@@ -650,10 +764,10 @@ function renderBacktest() {
     (state.marketsData.KOSDAQ || []).length +
     '일 · 나스닥 ' +
     (state.marketsData.NASDAQ || []).length +
-    '일 · SOX ' +
-    (state.marketsData.SOX || []).length +
+    '일 · VIX ' +
+    (state.marketsData.VIX || []).length +
     '일' +
-    ((state.marketsData.VIX || []).length ? ' · VIX ' + state.marketsData.VIX.length + '일' : '') +
+    ((state.marketsData.CL || []).length ? ' · 유가 ' + state.marketsData.CL.length + '일' : '') +
     '</div>' +
     '</section>';
 
@@ -684,7 +798,7 @@ function handleFileImport(event) {
           ...parsed
         };
         recomputeMarket(state.key);
-        showToast('데이터를 반영해 v3.1 전체 모델을 재계산했습니다.');
+        showToast('데이터를 반영해 v3.2 전체 모델을 재계산했습니다.');
       } else {
         const lines = text
           .split(/\r?\n/)

@@ -9,7 +9,7 @@
   <link rel="apple-touch-icon" href="icon-512.png" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="지수 관측소" />
-  <title>지수 관측소 v3.1 — 다변수 확률 보정 & 변동성 밴드</title>
+  <title>지수 관측소 v3.2 — 다변수 확률 보정 · 선물 · 글로벌 뉴스</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet" />
@@ -27,7 +27,7 @@
   <main class="max-w-xl mx-auto px-4 pt-5 pb-16">
     <header class="flex items-center justify-between pb-3 border-b border-slate-200">
       <div>
-        <div class="text-xs font-semibold text-teal-700 tracking-wide">INDEX DAYBOOK V3.1</div>
+        <div class="text-xs font-semibold text-teal-700 tracking-wide">INDEX DAYBOOK V3.2</div>
         <h1 class="text-xl font-bold tracking-tight text-slate-900">지수 관측소</h1>
       </div>
       <div class="flex items-center gap-2">
@@ -57,9 +57,9 @@
     </div>
 
     <details class="mt-4 rounded-2xl bg-white border border-slate-200 p-4 text-xs text-slate-600 leading-relaxed">
-      <summary class="font-bold text-slate-800 cursor-pointer">v3.1 모델 구조 및 면책 고지</summary>
+      <summary class="font-bold text-slate-800 cursor-pointer">v3.2 모델 구조 및 면책 고지</summary>
       <p class="mt-2">
-        기본 변수(당일·전일 등락률, 5일 모멘텀, 10일 실현변동성, 원/달러 환율, 한국 휴장 기간 누적 나스닥 등락)를 L2 정규화 로지스틱 회귀와 경험적 베이즈 수축으로 보정합니다. 확장 지표(SOX 상대강도, 코스닥 상승 비율, 외국인 순매수 강도, VIX, 미 국채 10년물 금리, DXY)는 최소 60거래일 이상 확보되고 전체 표본의 75% 이상을 유지할 때만 자동 활성화되어 소표본 과적합을 차단합니다.
+        기본 변수(당일·전일 등락률, 5일 모멘텀, 10일 실현변동성, 원/달러 환율, 누적 나스닥 등락)에 더해 확장 지표(SOX 상대강도, 코스닥 상승 비율, 외국인 수급, VIX, 미 국채 10년물, DXY, WTI 유가, 국제 금 선물)를 최소 60거래일·표본 유지율 75% 게이트 하에 자동 반영합니다. 또한 장전 미국 지수 선물 스냅샷과 글로벌 경제 뉴스 심리 카드를 함께 제공합니다.
       </p>
       <p class="mt-2">
         본 프로그램은 과거 통계 기반의 참고 지표이며 특정 금융투자상품에 대한 매수·매도 권유가 아닙니다. 모든 투자 판단과 책임은 이용자 본인에게 있습니다.
