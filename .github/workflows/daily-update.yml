@@ -1,0 +1,24 @@
+name: Daily Market Data Update (v3.1)
+on:
+  schedule:
+    - cron: '15 23 * * 0-4'
+    - cron: '25 13 * * 1-5'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install yfinance pandas pykrx requests
+      - run: python3 update_data.py --years 5 --krx-days 30
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data.js
+          git diff --staged --quiet || git commit -m "chore: update market snapshot"
+          git push
