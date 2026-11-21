@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0f172a" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="지수 관측소" />
+  <title>지수 관측소 v3.1 — 다변수 확률 보정 & 변동성 밴드</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    body {
+      font-family: 'Inter', 'Noto Sans KR', system-ui, sans-serif;
+      background-color: #f4f6f8;
+      color: #0f172a;
+    }
+  </style>
+</head>
+<body class="min-h-screen antialiased">
+  <main class="max-w-xl mx-auto px-4 pt-5 pb-16">
+    <header class="flex items-center justify-between pb-3 border-b border-slate-200">
+      <div>
+        <div class="text-xs font-semibold text-teal-700 tracking-wide">INDEX DAYBOOK V3.1</div>
+        <h1 class="text-xl font-bold tracking-tight text-slate-900">지수 관측소</h1>
+      </div>
+      <div class="flex items-center gap-2">
+        <label for="date-select" class="sr-only">기준 종가 날짜</label>
+        <select id="date-select" class="text-xs font-semibold bg-white border border-slate-300 rounded-xl px-2.5 py-2 text-slate-800 shadow-sm"></select>
+      </div>
+    </header>
+
+    <nav id="market-tabs" aria-label="지수 선택" class="mt-3 flex gap-1.5 bg-slate-200/70 p-1 rounded-xl"></nav>
+
+    <div id="view-tabs" role="tablist" aria-label="화면 전환" class="mt-3 flex border-b border-slate-200">
+      <button type="button" role="tab" data-tab="forecast" aria-selected="true">전망</button>
+      <button type="button" role="tab" data-tab="simulator" aria-selected="false">시뮬레이터</button>
+      <button type="button" role="tab" data-tab="backtest" aria-selected="false">검증 · 데이터</button>
+    </div>
+
+    <div id="panel-forecast" class="mt-3">
+      <div id="forecast-content" aria-live="polite"></div>
+    </div>
+
+    <div id="panel-simulator" class="mt-3 hidden">
+      <div id="simulator-content"></div>
+    </div>
+
+    <div id="panel-backtest" class="mt-3 hidden">
+      <div id="backtest-content"></div>
+    </div>
+
+    <details class="mt-4 rounded-2xl bg-white border border-slate-200 p-4 text-xs text-slate-600 leading-relaxed">
+      <summary class="font-bold text-slate-800 cursor-pointer">v3.1 모델 구조 및 면책 고지</summary>
+      <p class="mt-2">
+        기본 변수(당일·전일 등락률, 5일 모멘텀, 10일 실현변동성, 원/달러 환율, 한국 휴장 기간 누적 나스닥 등락)를 L2 정규화 로지스틱 회귀와 경험적 베이즈 수축으로 보정합니다. 확장 지표(SOX 상대강도, 코스닥 상승 비율, 외국인 순매수 강도, VIX, 미 국채 10년물 금리, DXY)는 최소 60거래일 이상 확보되고 전체 표본의 75% 이상을 유지할 때만 자동 활성화되어 소표본 과적합을 차단합니다.
+      </p>
+      <p class="mt-2">
+        본 프로그램은 과거 통계 기반의 참고 지표이며 특정 금융투자상품에 대한 매수·매도 권유가 아닙니다. 모든 투자 판단과 책임은 이용자 본인에게 있습니다.
+      </p>
+    </details>
+  </main>
+
+  <div id="toast" class="hidden" role="status" aria-live="polite"></div>
+
+  <script src="data.js"></script>
+  <script src="model.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
