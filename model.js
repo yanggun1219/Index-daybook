@@ -1,4 +1,4 @@
-// 지수 관측소 v4.1 — 나스닥 한국장 선행 잔차 + 전용 정규화 + VIX3M·DAX 확장 + 1일/5일 듀얼 호라이즌
+// 지수 관측소 v4.3 — 나스닥 한국장 선행 잔차 + 전용 정규화 + VIX3M·DAX 확장 + 1일/5일 듀얼 호라이즌
 
 const MIN_BASE_SAMPLES = 18;
 const MIN_EXTRA_SAMPLES = 60;
@@ -36,7 +36,10 @@ const EXTRA_META = {
   ret20: { key: 'ret20', label: '20거래일 중기 추세', unit: '%', min: -25, max: 25, step: 0.5 },
   krLead: { key: 'krLead', label: '한국장(코스피) 장전 등락', unit: '%', min: -8, max: 8, step: 0.1 },
   krResid: { key: 'krResid', label: '코스피 장전 독자 변동분', unit: '%p', min: -6, max: 6, step: 0.1 },
-  dax: { key: 'dax', label: '유럽장(독일 DAX) 등락', unit: '%', min: -8, max: 8, step: 0.1 }
+  dax: { key: 'dax', label: '유럽장(독일 DAX) 등락', unit: '%', min: -8, max: 8, step: 0.1 },
+  news: { key: 'news', label: '글로벌 뉴스 심리', unit: '점', min: -100, max: 100, step: 5 },
+  krFut: { key: 'krFut', label: '코스피200 선물 등락', unit: '%', min: -6, max: 6, step: 0.1 },
+  krBasis: { key: 'krBasis', label: '코스피200 선물 베이시스', unit: 'pt', min: -5, max: 5, step: 0.1 }
 };
 
 function getConvictionThreshold(marketKey) {
@@ -348,6 +351,9 @@ function buildMacroMaps(data) {
     oilPct: buildDiffMap(data.CL || [], true),
     goldPct: buildDiffMap(data.GC || [], true),
     daxPct: buildDiffMap(data.DAX || [], true),
+    newsMap: new Map(data.NEWS_HIST || []),
+    krFutMap: new Map((data.KR_FUT_HIST || []).map(r => [r[0], r[1]])),
+    krBasisMap: new Map((data.KR_FUT_HIST || []).map(r => [r[0], r[2]])),
     kospiByDate,
     kospiDates
   };
@@ -357,16 +363,16 @@ function getCandidateKeys(key, horizon) {
   if (key === 'NASDAQ') {
     return horizon === 5
       ? ['vix', 'vixRatio', 'tnx', 'dxy', 'ret20', 'oil', 'gold']
-      : ['krLead', 'krResid', 'vixRatio', 'dax', 'vix', 'tnx', 'dxy'];
+      : ['krLead', 'krResid', 'vixRatio', 'dax', 'vix', 'tnx', 'dxy', 'news'];
   }
   if (key === 'KOSPI') {
     return horizon === 5
       ? ['sox', 'vix', 'ret20', 'oil', 'gold']
-      : ['sox', 'vix', 'usVix', 'flow', 'oil', 'gold'];
+      : ['sox', 'vix', 'usVix', 'flow', 'oil', 'gold', 'krFut', 'krBasis', 'news'];
   }
   return horizon === 5
     ? ['vix', 'ret20', 'oil', 'gold']
-    : ['breadth', 'flow', 'vix', 'oil', 'gold'];
+    : ['breadth', 'flow', 'vix', 'oil', 'gold', 'krFut', 'news'];
 }
 
 function makeExtraRecord(refUsDate, breadth, flow, maps, current, key, nextUsDate) {
@@ -404,6 +410,9 @@ function makeExtraRecord(refUsDate, breadth, flow, maps, current, key, nextUsDat
     oil: refUsDate ? maps.oilPct.get(refUsDate) : undefined,
     gold: refUsDate ? maps.goldPct.get(refUsDate) : undefined,
     dax: refUsDate ? maps.daxPct.get(refUsDate) : undefined,
+    news: refUsDate ? maps.newsMap.get(refUsDate) : undefined,
+    krFut: refUsDate ? maps.krFutMap.get(refUsDate) : undefined,
+    krBasis: refUsDate ? maps.krBasisMap.get(refUsDate) : undefined,
     usVix,
     ret20: current ? current.ret20 : undefined,
     krLead,
@@ -646,5 +655,86 @@ function forecastV1(rows, end) {
     high: quantile(outcomes, 0.9),
     gain: quantile(up, 0.5),
     loss: quantile(down, 0.5)
+  };
+}
+
+// 실시간 글로벌 뉴스 투심 보정 (과거 60일 이력 축적 전 최신일 전망용, 최대 약 ±4.5%p)
+function applyNewsOverlay(forecast, sentimentScore, marketKey, enabled) {
+  if (!forecast) return forecast;
+  const score = Number.isFinite(sentimentScore) ? Math.max(-100, Math.min(100, sentimentScore)) : 0;
+  // 이미 학습 모델에 news가 정식 반영된 경우 중복 보정 방지
+  const alreadyLearned = Array.isArray(forecast.active) && forecast.active.includes('news');
+  if (!enabled || alreadyLearned || score === 0) {
+    return {
+      ...forecast,
+      pureP: forecast.p,
+      newsImpactPct: 0,
+      newsApplied: false,
+      newsScore: score
+    };
+  }
+  const pClamped = Math.max(0.02, Math.min(0.98, forecast.p));
+  const baseLogit = Math.log(pClamped / (1 - pClamped));
+  const deltaLogit = (score / 100) * 0.18; // ~±4.5%p at p=0.50, scaled smoothly near extremes
+  const adjP = sigmoid(baseLogit + deltaLogit);
+  const impactPct = (adjP - forecast.p) * 100;
+  return {
+    ...forecast,
+    pureP: forecast.p,
+    p: adjP,
+    down: Math.max(0, 1 - adjP),
+    score: Math.round(adjP * 100),
+    signal: classifySignal(adjP, marketKey),
+    newsImpactPct: impactPct,
+    newsApplied: true,
+    newsScore: score,
+    contributions: forecast.contributions.concat([
+      {
+        key: 'newsOverlay',
+        label: '글로벌 뉴스 투심 보정',
+        unit: '점',
+        value: score,
+        impactPct
+      }
+    ])
+  };
+}
+
+// 실시간 코스피200 국내선물 보정 (60일 누적 학습 전 최신일 코스피·코스닥 전망용, 최대 약 ±7%p)
+function applyKrFuturesOverlay(forecast, krFutPct, krBasis, marketKey, enabled) {
+  if (!forecast) return forecast;
+  if (marketKey === 'NASDAQ') {
+    return { ...forecast, krFutApplied: false, krFutImpactPct: 0, krFutPct: 0 };
+  }
+  const pct = Number.isFinite(krFutPct) ? Math.max(-6, Math.min(6, krFutPct)) : 0;
+  const basis = Number.isFinite(krBasis) ? Math.max(-5, Math.min(5, krBasis)) : 0;
+  const alreadyLearned = Array.isArray(forecast.active) && forecast.active.includes('krFut');
+  if (!enabled || alreadyLearned || (pct === 0 && basis === 0)) {
+    return { ...forecast, krFutApplied: false, krFutImpactPct: 0, krFutPct: pct, krBasis: basis };
+  }
+  const pClamped = Math.max(0.02, Math.min(0.98, forecast.p));
+  const baseLogit = Math.log(pClamped / (1 - pClamped));
+  const deltaLogit = Math.max(-0.28, Math.min(0.28, pct * 0.10 + basis * 0.02));
+  const adjP = sigmoid(baseLogit + deltaLogit);
+  const impactPct = (adjP - forecast.p) * 100;
+  return {
+    ...forecast,
+    p: adjP,
+    down: Math.max(0, 1 - adjP),
+    score: Math.round(adjP * 100),
+    signal: classifySignal(adjP, marketKey),
+    krFutApplied: true,
+    krFutImpactPct: impactPct,
+    krFutPct: pct,
+    krBasis: basis,
+    contributions: forecast.contributions.concat([
+      {
+        key: 'krFutOverlay',
+        label: '코스피200 선물 보정',
+        unit: '%',
+        value: pct,
+        impactPct
+      }
+    ])
   };
 }

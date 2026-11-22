@@ -1,4 +1,4 @@
-// 지수 관측소 v4.1 — 듀얼 호라이즌(1일·5일) + 고확신 신호 필터 + 선물·원자재·뉴스 모바일 앱
+// 지수 관측소 v4.3 — 듀얼 호라이즌(1일·5일) + 고확신 신호 필터 + 선물·원자재·뉴스 모바일 앱
 
 const MARKET_NAMES = {
   KOSPI: '코스피',
@@ -17,6 +17,10 @@ const state = {
   historyV2: null,
   historyV1: null,
   simValues: [],
+  simNews: 0,
+  simKrFut: 0,
+  useNewsOverlay: true,
+  useKrFutOverlay: true,
   chartInstance: null
 };
 
@@ -98,8 +102,25 @@ function recomputeMarket(id, keepDate) {
   }
 
   if (state.dateIdx >= 0) {
-    state.currentForecast = forecastSingleDay(rows, state.dateIdx, id, state.marketsData, state.horizon);
+    const rawF = forecastSingleDay(rows, state.dateIdx, id, state.marketsData, state.horizon);
+    const isLatest = state.dateIdx === rows.length - 1;
+    const liveNewsScore =
+      state.marketsData.NEWS && Number.isFinite(state.marketsData.NEWS.sentiment)
+        ? state.marketsData.NEWS.sentiment
+        : 0;
+    const futObj = state.marketsData.FUTURES || {};
+    const liveKrFut = Number.isFinite(futObj.K200_pct) ? futObj.K200_pct : 0;
+    const liveKrBasis = Number.isFinite(futObj.K200_basis) ? futObj.K200_basis : 0;
+    let adjF = isLatest
+      ? applyNewsOverlay(rawF, liveNewsScore, id, state.useNewsOverlay)
+      : applyNewsOverlay(rawF, 0, id, false);
+    adjF = isLatest
+      ? applyKrFuturesOverlay(adjF, liveKrFut, liveKrBasis, id, state.useKrFutOverlay)
+      : applyKrFuturesOverlay(adjF, 0, 0, id, false);
+    state.currentForecast = adjF;
     state.simValues = state.currentForecast ? [...state.currentForecast.rawFeats] : [];
+    state.simNews = isLatest ? liveNewsScore : 0;
+    state.simKrFut = isLatest ? liveKrFut : 0;
   } else {
     state.currentForecast = null;
     state.simValues = [];
@@ -132,79 +153,113 @@ function switchTab(tabId) {
   if (tabId === 'backtest') renderBacktest();
 }
 
-function renderFuturesAndNewsSection() {
+function renderFuturesAndNewsSection(f) {
   const fut = state.marketsData.FUTURES;
   const news = state.marketsData.NEWS;
 
   let html = '';
-  if (fut && typeof fut === 'object') {
-    const items = [
-      { label: '나스닥100 선물', val: fut.NQ_pct, price: fut.NQ },
-      { label: 'S&P500 선물', val: fut.ES_pct, price: fut.ES },
-      { label: 'WTI 유가', val: fut.CL_pct, price: fut.CL },
-      { label: '국제 금', val: fut.GC_pct, price: fut.GC }
-    ].filter(x => Number.isFinite(x.val));
+  const items =
+    fut && typeof fut === 'object'
+      ? [
+          { label: fut.K200_name ? '코스피200 선물' : '코스피200 선물', val: fut.K200_pct, price: fut.K200, basis: fut.K200_basis },
+          { label: '나스닥100 선물', val: fut.NQ_pct, price: fut.NQ },
+          { label: 'S&P500 선물', val: fut.ES_pct, price: fut.ES },
+          { label: 'WTI 유가', val: fut.CL_pct, price: fut.CL },
+          { label: '국제 금', val: fut.GC_pct, price: fut.GC }
+        ].filter(x => Number.isFinite(x.val))
+      : [];
 
-    if (items.length) {
-      html +=
-        '<section class="mt-3 rounded-2xl bg-white border border-slate-200 p-4 shadow-sm">' +
-        '<div class="flex items-center justify-between mb-2">' +
-        '<h2 class="text-sm font-bold text-slate-900">장전 선물 · 원자재 스냅샷</h2>' +
-        '<span class="text-[11px] text-slate-500">' +
-        escapeHtml(fut.updatedKst || '') +
-        '</span>' +
-        '</div>' +
-        '<div class="grid grid-cols-2 gap-2">' +
-        items
-          .map(it => {
-            const pos = it.val >= 0;
-            return (
-              '<div class="rounded-xl bg-slate-50 border border-slate-100 px-3 py-2">' +
-              '<div class="text-[11px] text-slate-500">' +
-              it.label +
-              '</div>' +
-              '<div class="mt-0.5 flex items-baseline justify-between tabular-nums">' +
-              '<span class="text-xs font-semibold text-slate-800">' +
-              (Number.isFinite(it.price) ? it.price.toLocaleString('en-US') : '-') +
-              '</span>' +
-              '<span class="text-xs font-bold ' +
-              (pos ? 'text-teal-700' : 'text-rose-700') +
-              '">' +
-              fmtMove(it.val) +
-              '</span>' +
-              '</div>' +
-              '</div>'
-            );
-          })
-          .join('') +
-        '</div>' +
-        '</section>';
-    }
-  }
-
-  if (news && Array.isArray(news.items) && news.items.length) {
-    const score = Number.isFinite(news.sentiment) ? news.sentiment : 0;
-    const toneClass =
-      score >= 15
-        ? 'bg-teal-50 text-teal-800'
-        : score <= -15
-          ? 'bg-rose-50 text-rose-800'
-          : 'bg-slate-100 text-slate-700';
-    const toneLabel = score >= 15 ? '우호적' : score <= -15 ? '경계·부정' : '중립';
-
+  html +=
+    '<section class="mt-3 rounded-2xl bg-white border border-slate-200 p-4 shadow-sm">' +
+    '<div class="flex items-center justify-between mb-2">' +
+    '<div class="flex items-center gap-2">' +
+    '<h2 class="text-sm font-bold text-slate-900">국내·해외 선물 · 원자재</h2>' +
+    '<span class="text-[11px] text-slate-500">' +
+    escapeHtml((fut && fut.updatedKst) || '수집 대기') +
+    '</span>' +
+    '</div>' +
+    (state.key !== 'NASDAQ'
+      ? '<button id="toggle-krfut-overlay" type="button" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold transition ' +
+        (state.useKrFutOverlay ? 'bg-teal-700 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200') +
+        '">국내선물 ' +
+        (state.useKrFutOverlay ? 'ON' : 'OFF') +
+        '</button>'
+      : '') +
+    '</div>';
+  if (items.length) {
     html +=
-      '<section class="mt-3 rounded-2xl bg-white border border-slate-200 p-4 shadow-sm">' +
-      '<div class="flex items-center justify-between mb-2">' +
-      '<h2 class="text-sm font-bold text-slate-900">글로벌 주요 경제 뉴스</h2>' +
-      '<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold tabular-nums ' +
-      toneClass +
-      '">심리 ' +
-      toneLabel +
-      ' (' +
-      (score > 0 ? '+' : '') +
-      score +
-      ')</span>' +
-      '</div>' +
+      '<div class="grid grid-cols-2 gap-2">' +
+      items
+        .map(it => {
+          const pos = it.val >= 0;
+          return (
+            '<div class="rounded-xl bg-slate-50 border border-slate-100 px-3 py-2">' +
+            '<div class="flex items-center justify-between text-[11px] text-slate-500">' +
+            '<span>' + it.label + '</span>' +
+            (Number.isFinite(it.basis) ? '<span class="text-[10px] font-semibold text-teal-700">베이시스 ' + (it.basis >= 0 ? '+' : '') + it.basis.toFixed(2) + '</span>' : '') +
+            '</div>' +
+            '<div class="mt-0.5 flex items-baseline justify-between tabular-nums">' +
+            '<span class="text-xs font-semibold text-slate-800">' +
+            (Number.isFinite(it.price) ? it.price.toLocaleString('en-US') : '-') +
+            '</span>' +
+            '<span class="text-xs font-bold ' +
+            (pos ? 'text-teal-700' : 'text-rose-700') +
+            '">' +
+            fmtMove(it.val) +
+            '</span>' +
+            '</div>' +
+            '</div>'
+          );
+        })
+        .join('') +
+      '</div>';
+  } else {
+    html +=
+      '<p class="text-xs text-slate-500 leading-relaxed">GitHub Actions의 <strong>Update Index Data</strong> 워크플로우가 실행되면 나스닥100·S&amp;P500 선물, WTI 유가, 금 시세가 자동으로 채워집니다.</p>';
+  }
+  html += '</section>';
+
+  const hasNews = news && Array.isArray(news.items) && news.items.length > 0;
+  const score = hasNews && Number.isFinite(news.sentiment) ? news.sentiment : 0;
+  const toneClass =
+    score >= 15
+      ? 'bg-teal-50 text-teal-800'
+      : score <= -15
+        ? 'bg-rose-50 text-rose-800'
+        : 'bg-slate-100 text-slate-700';
+  const toneLabel = !hasNews ? '수집 대기' : score >= 15 ? '우호적' : score <= -15 ? '경계·부정' : '중립';
+  const impactNote =
+    f && f.newsApplied
+      ? '확률 보정 ' + (f.newsImpactPct >= 0 ? '+' : '') + f.newsImpactPct.toFixed(2) + '%p 반영 중'
+      : state.useNewsOverlay
+        ? '뉴스 수집 시 확률에 자동 보정(최대 ±4.5%p)'
+        : '뉴스 보정 꺼짐 (순수 가격 모델)';
+
+  html +=
+    '<section class="mt-3 rounded-2xl bg-white border border-slate-200 p-4 shadow-sm">' +
+    '<div class="flex items-center justify-between gap-2 mb-2 flex-wrap">' +
+    '<div class="flex items-center gap-2">' +
+    '<h2 class="text-sm font-bold text-slate-900">글로벌 주요 경제 뉴스</h2>' +
+    '<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold tabular-nums ' +
+    toneClass +
+    '">' +
+    (hasNews ? '심리 ' + toneLabel + ' (' + (score > 0 ? '+' : '') + score + ')' : toneLabel) +
+    '</span>' +
+    '</div>' +
+    '<button id="toggle-news-overlay" type="button" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold transition ' +
+    (state.useNewsOverlay
+      ? 'bg-teal-700 text-white'
+      : 'bg-slate-100 text-slate-600 hover:bg-slate-200') +
+    '">투심 반영 ' +
+    (state.useNewsOverlay ? 'ON' : 'OFF') +
+    '</button>' +
+    '</div>' +
+    '<div class="text-[11px] text-slate-500 mb-2">' +
+    impactNote +
+    '</div>';
+
+  if (hasNews) {
+    html +=
       '<ul class="divide-y divide-slate-100 text-xs">' +
       news.items
         .slice(0, 5)
@@ -227,9 +282,12 @@ function renderFuturesAndNewsSection() {
           );
         })
         .join('') +
-      '</ul>' +
-      '</section>';
+      '</ul>';
+  } else {
+    html +=
+      '<p class="text-xs text-slate-500 leading-relaxed">아직 수집된 뉴스가 없습니다. GitHub Actions에서 <strong>Update Index Data</strong>를 실행하면 최신 헤드라인 5건과 심리 점수가 표시되며, 시뮬레이터 탭에서 뉴스 심리(-100~+100)를 직접 조정해 볼 수도 있습니다.</p>';
   }
+  html += '</section>';
   return html;
 }
 
@@ -354,7 +412,7 @@ function renderForecast() {
     MARKET_NAMES[state.key] +
     ' ' +
     horizonLabel +
-    ' (v4.1)</span>' +
+    ' (v4.3)</span>' +
     '<div class="flex items-center gap-1.5">' +
     '<span class="text-[11px] px-2 py-0.5 rounded-full ' +
     regimeBadgeClass +
@@ -397,7 +455,7 @@ function renderForecast() {
     '</span>' +
     '</div>' +
     '</section>' +
-    renderFuturesAndNewsSection() +
+    renderFuturesAndNewsSection(f) +
     '<section class="mt-3 rounded-2xl bg-white border border-slate-200 p-4 shadow-sm">' +
     '<div class="flex items-center justify-between mb-2">' +
     '<h2 class="text-sm font-bold text-slate-900">' +
@@ -462,6 +520,22 @@ function renderForecast() {
     '</div>' +
     '</section>';
 
+  const toggleKrBtn = document.getElementById('toggle-krfut-overlay');
+  if (toggleKrBtn) {
+    toggleKrBtn.addEventListener('click', () => {
+      state.useKrFutOverlay = !state.useKrFutOverlay;
+      recomputeMarket(state.key, true);
+      showToast(state.useKrFutOverlay ? '코스피200 국내선물 보정을 켰습니다.' : '국내선물 보정을 껐습니다.');
+    });
+  }
+  const toggleBtn = document.getElementById('toggle-news-overlay');
+  if (toggleBtn) {
+    toggleBtn.addEventListener('click', () => {
+      state.useNewsOverlay = !state.useNewsOverlay;
+      recomputeMarket(state.key, true);
+      showToast(state.useNewsOverlay ? '글로벌 뉴스 투심 보정을 켰습니다.' : '순수 가격 모델 확률로 전환했습니다.');
+    });
+  }
   renderPriceChart();
 }
 
@@ -576,7 +650,8 @@ function renderSimulator() {
 
   const volIdx = meta.findIndex(m => m.key === 'vol10');
   const getSimVol = () => (volIdx >= 0 ? state.simValues[volIdx] : f.vol);
-  const simOut = predictWithModel(f.modelRef, state.simValues, getSimVol(), state.key, meta, state.horizon);
+  const simRaw = predictWithModel(f.modelRef, state.simValues, getSimVol(), state.key, meta, state.horizon);
+  const simOut = applyKrFuturesOverlay(applyNewsOverlay(simRaw, state.simNews, state.key, true), state.simKrFut, 0, state.key, state.key !== 'NASDAQ');
   const diffP = (simOut.p - f.p) * 100;
 
   const slidersHtml = meta
@@ -650,31 +725,80 @@ function renderSimulator() {
     '</div>' +
     '<div>' +
     slidersHtml +
+    (state.key !== 'NASDAQ'
+      ? '<div class="py-2.5 border-t border-slate-100">' +
+        '<div class="flex items-center justify-between text-xs mb-1.5">' +
+        '<label for="sim-krfut" class="font-semibold text-teal-800">코스피200 국내선물 등락 (KIS)</label>' +
+        '<span id="sim-krfut-val" class="font-bold text-teal-900 tabular-nums">' +
+        (state.simKrFut > 0 ? '+' : '') +
+        state.simKrFut.toFixed(2) +
+        '%</span>' +
+        '</div>' +
+        '<input id="sim-krfut" type="range" min="-6" max="6" step="0.1" value="' +
+        state.simKrFut.toFixed(2) +
+        '" class="w-full accent-teal-700 cursor-pointer" />' +
+        '</div>'
+      : '') +
+    '<div class="py-2.5 border-t border-slate-100">' +
+    '<div class="flex items-center justify-between text-xs mb-1.5">' +
+    '<label for="sim-news" class="font-semibold text-teal-800">글로벌 뉴스 투심 점수 (오버레이)</label>' +
+    '<span id="sim-news-val" class="font-bold text-teal-900 tabular-nums">' +
+    (state.simNews > 0 ? '+' : '') +
+    state.simNews +
+    '점</span>' +
+    '</div>' +
+    '<input id="sim-news" type="range" min="-100" max="100" step="5" value="' +
+    state.simNews +
+    '" class="w-full accent-teal-700 cursor-pointer" />' +
+    '</div>' +
     '</div>' +
     '</section>';
 
-  for (const input of container.querySelectorAll('input[type="range"]')) {
+  const refreshSimDisplay = () => {
+    const rawUpd = predictWithModel(f.modelRef, state.simValues, getSimVol(), state.key, meta, state.horizon);
+    const updated = applyKrFuturesOverlay(applyNewsOverlay(rawUpd, state.simNews, state.key, true), state.simKrFut, 0, state.key, state.key !== 'NASDAQ');
+    document.getElementById('sim-prob').textContent = fmtPct(updated.p);
+    const dPct = (updated.p - f.p) * 100;
+    const chEl = document.getElementById('sim-change');
+    chEl.textContent = '기존 대비 ' + (dPct >= 0 ? '+' : '') + dPct.toFixed(1) + '%p';
+    chEl.className = 'text-xs font-semibold tabular-nums ' + (dPct >= 0 ? 'text-emerald-300' : 'text-rose-300');
+    document.getElementById('sim-band').textContent = fmtMove(updated.low) + ' ~ ' + fmtMove(updated.high);
+  };
+
+  for (const input of container.querySelectorAll('input[data-idx]')) {
     input.addEventListener('input', e => {
       const idx = Number(e.target.dataset.idx);
       state.simValues[idx] = Number(e.target.value);
-      const updated = predictWithModel(f.modelRef, state.simValues, getSimVol(), state.key, meta, state.horizon);
       const m = meta[idx];
       document.getElementById('sim-val-' + idx).textContent =
         (state.simValues[idx] > 0 && m.key !== 'vol10' && m.key !== 'vix' && m.key !== 'breadth' ? '+' : '') +
         state.simValues[idx].toFixed(2) +
         m.unit;
-      document.getElementById('sim-prob').textContent = fmtPct(updated.p);
-      const dPct = (updated.p - f.p) * 100;
-      const chEl = document.getElementById('sim-change');
-      chEl.textContent = '기존 대비 ' + (dPct >= 0 ? '+' : '') + dPct.toFixed(1) + '%p';
-      chEl.className = 'text-xs font-semibold tabular-nums ' + (dPct >= 0 ? 'text-emerald-300' : 'text-rose-300');
-      document.getElementById('sim-band').textContent =
-        fmtMove(updated.low) + ' ~ ' + fmtMove(updated.high);
+      refreshSimDisplay();
+    });
+  }
+
+  const krFutSlider = document.getElementById('sim-krfut');
+  if (krFutSlider) {
+    krFutSlider.addEventListener('input', e => {
+      state.simKrFut = Number(e.target.value);
+      document.getElementById('sim-krfut-val').textContent = (state.simKrFut > 0 ? '+' : '') + state.simKrFut.toFixed(2) + '%';
+      refreshSimDisplay();
+    });
+  }
+  const newsSlider = document.getElementById('sim-news');
+  if (newsSlider) {
+    newsSlider.addEventListener('input', e => {
+      state.simNews = Number(e.target.value);
+      document.getElementById('sim-news-val').textContent = (state.simNews > 0 ? '+' : '') + state.simNews + '점';
+      refreshSimDisplay();
     });
   }
 
   document.getElementById('sim-reset').addEventListener('click', () => {
     state.simValues = [...f.rawFeats];
+    state.simNews = f.newsScore || 0;
+    state.simKrFut = f.krFutPct || 0;
     renderSimulator();
     showToast('선택한 기준일의 실제 변수 값으로 복원했습니다.');
   });
@@ -776,7 +900,7 @@ function renderBacktest() {
     '</tr></thead>' +
     '<tbody class="divide-y divide-slate-100 tabular-nums">' +
     '<tr class="bg-teal-50/50 font-semibold text-slate-900">' +
-    '<td class="py-2.5 pr-2">개선 v4.1 (시장별 전용 엔진)</td>' +
+    '<td class="py-2.5 pr-2">개선 v4.3 (시장별 전용 엔진)</td>' +
     '<td class="py-2.5 px-2 text-right text-teal-800">' +
     fmtB(brierV4) +
     '</td>' +
@@ -851,7 +975,7 @@ function handleFileImport(event) {
         validateImport(parsed);
         state.marketsData = { ...state.marketsData, ...parsed };
         recomputeMarket(state.key, false);
-        showToast('데이터를 반영해 v4.1 전체 모델을 재계산했습니다.');
+        showToast('데이터를 반영해 v4.3 전체 모델을 재계산했습니다.');
       } else {
         const lines = text
           .split(/\r?\n/)
@@ -908,8 +1032,25 @@ function initApp() {
   document.getElementById('date-select').addEventListener('change', e => {
     state.dateIdx = Number(e.target.value);
     const rows = state.marketsData[state.key] || [];
-    state.currentForecast = forecastSingleDay(rows, state.dateIdx, state.key, state.marketsData, state.horizon);
+    const rawF = forecastSingleDay(rows, state.dateIdx, state.key, state.marketsData, state.horizon);
+    const isLatest = state.dateIdx === rows.length - 1;
+    const liveNewsScore =
+      state.marketsData.NEWS && Number.isFinite(state.marketsData.NEWS.sentiment)
+        ? state.marketsData.NEWS.sentiment
+        : 0;
+    const futObj = state.marketsData.FUTURES || {};
+    const liveKrFut = Number.isFinite(futObj.K200_pct) ? futObj.K200_pct : 0;
+    const liveKrBasis = Number.isFinite(futObj.K200_basis) ? futObj.K200_basis : 0;
+    let adjF = isLatest
+      ? applyNewsOverlay(rawF, liveNewsScore, state.key, state.useNewsOverlay)
+      : applyNewsOverlay(rawF, 0, state.key, false);
+    adjF = isLatest
+      ? applyKrFuturesOverlay(adjF, liveKrFut, liveKrBasis, state.key, state.useKrFutOverlay)
+      : applyKrFuturesOverlay(adjF, 0, 0, state.key, false);
+    state.currentForecast = adjF;
     state.simValues = state.currentForecast ? [...state.currentForecast.rawFeats] : [];
+    state.simNews = isLatest ? liveNewsScore : 0;
+    state.simKrFut = isLatest ? liveKrFut : 0;
     renderAll();
   });
 
