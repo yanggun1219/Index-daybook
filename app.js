@@ -1,4 +1,4 @@
-// 지수 관측소 v5.1 — 듀얼 호라이즌(1일·5일) + 고확신 신호 필터 + 선물·원자재·뉴스 모바일 앱
+// 지수 관측소 v5.2 — 듀얼 호라이즌(1일·5일) + 고확신 신호 필터 + 선물·원자재·뉴스 모바일 앱
 
 const MARKET_NAMES = {
   KOSPI: '코스피',
@@ -168,7 +168,8 @@ function renderFuturesAndNewsSection(f) {
           { label: '나스닥100 선물', val: fut.NQ_pct, price: fut.NQ },
           { label: 'S&P500 선물', val: fut.ES_pct, price: fut.ES },
           { label: 'WTI 유가', val: fut.CL_pct, price: fut.CL },
-          { label: '국제 금', val: fut.GC_pct, price: fut.GC }
+          { label: '국제 금', val: fut.GC_pct, price: fut.GC },
+          { label: 'BTC 무기한 선물', val: fut.BTC_pct, price: fut.BTC, funding: fut.BTC_funding }
         ].filter(x => Number.isFinite(x.val))
       : [];
 
@@ -200,6 +201,7 @@ function renderFuturesAndNewsSection(f) {
             '<div class="flex items-center justify-between text-[11px] text-slate-500">' +
             '<span>' + it.label + '</span>' +
             (Number.isFinite(it.basis) ? '<span class="text-[10px] font-semibold text-teal-700">베이시스 ' + (it.basis >= 0 ? '+' : '') + it.basis.toFixed(2) + '</span>' : '') +
+            (Number.isFinite(it.funding) ? '<span class="text-[10px] font-semibold text-indigo-700">펀딩 ' + (it.funding >= 0 ? '+' : '') + it.funding.toFixed(3) + '%</span>' : '') +
             '</div>' +
             '<div class="mt-0.5 flex items-baseline justify-between tabular-nums">' +
             '<span class="text-xs font-semibold text-slate-800">' +
@@ -275,11 +277,19 @@ function renderFuturesAndNewsSection(f) {
               escapeHtml(item.title) +
               '</a>'
             : '<span class="font-medium text-slate-800">' + escapeHtml(item.title) + '</span>';
+          const transBadge = item.translated
+            ? '<span class="ml-1.5 inline-block px-1.5 py-0.2 rounded bg-teal-50 text-teal-700 text-[10px] font-semibold align-middle">한글번역</span>'
+            : '';
+          const summaryHtml = item.summary
+            ? '<div class="text-[11px] text-slate-500 mt-0.5 leading-snug">' + escapeHtml(item.summary) + '</div>'
+            : '';
           return (
-            '<li class="py-2 flex items-start justify-between gap-2">' +
+            '<li class="py-2.5 flex items-start justify-between gap-2">' +
             '<div class="leading-snug">' +
             titleHtml +
-            (item.source ? '<div class="text-[11px] text-slate-400 mt-0.5">' + escapeHtml(item.source) + '</div>' : '') +
+            transBadge +
+            summaryHtml +
+            (item.source ? '<div class="text-[10px] text-slate-400 mt-0.5">' + escapeHtml(item.source) + '</div>' : '') +
             '</div>' +
             '</li>'
           );
@@ -415,7 +425,7 @@ function renderForecast() {
     MARKET_NAMES[state.key] +
     ' ' +
     horizonLabel +
-    ' (v5.1)</span>' +
+    ' (v5.2)</span>' +
     '<div class="flex items-center gap-1.5">' +
     (state.isLiveIntraday ? '<span class="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/25 text-amber-200 border border-amber-400/40 font-semibold">장중 실시간 잠정</span>' : '') +
     '<span class="text-[11px] px-2 py-0.5 rounded-full ' +
@@ -904,7 +914,7 @@ function renderBacktest() {
     '</tr></thead>' +
     '<tbody class="divide-y divide-slate-100 tabular-nums">' +
     '<tr class="bg-teal-50/50 font-semibold text-slate-900">' +
-    '<td class="py-2.5 pr-2">개선 v5.1 (시장별 전용 엔진)</td>' +
+    '<td class="py-2.5 pr-2">개선 v5.2 (시장별 전용 엔진)</td>' +
     '<td class="py-2.5 px-2 text-right text-teal-800">' +
     fmtB(brierV4) +
     '</td>' +
@@ -1003,7 +1013,7 @@ function handleFileImport(event) {
         validateImport(parsed);
         state.marketsData = { ...state.marketsData, ...parsed };
         recomputeMarket(state.key, false);
-        showToast('데이터를 반영해 v5.1 전체 모델을 재계산했습니다.');
+        showToast('데이터를 반영해 v5.2 전체 모델을 재계산했습니다.');
       } else {
         const lines = text
           .split(/\r?\n/)

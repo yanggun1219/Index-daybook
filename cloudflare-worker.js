@@ -5,8 +5,8 @@ const ALLOWED_ORIGINS = [
   'http://127.0.0.1:8000'
 ];
 
-const POS_WORDS = ['rally', 'surge', 'gain', 'rise', 'jump', 'beat', 'cut', 'dovish', 'cooling', 'growth', 'record', 'up', 'rebound', '상승', '반등', '호조', '강세', '완화'];
-const NEG_WORDS = ['drop', 'fall', 'plunge', 'slump', 'crash', 'fear', 'inflation', 'hawkish', 'tariff', 'war', 'risk', 'down', 'selloff', '하락', '급락', '우려', '약세', '관세', '충격'];
+const POS_WORDS = ['rally', 'surge', 'gain', 'rise', 'jump', 'beat', 'cut', 'dovish', 'cooling', 'growth', 'record', 'up', 'rebound', 'bull', 'soar', 'boost', '상승', '반등', '호조', '강세', '완화', '최고', '급등', '돌파', '기대', '순매수'];
+const NEG_WORDS = ['drop', 'fall', 'plunge', 'slump', 'crash', 'fear', 'inflation', 'hawkish', 'tariff', 'war', 'risk', 'down', 'selloff', 'bear', 'sink', 'tumble', '하락', '급락', '우려', '약세', '관세', '충격', '폭락', '위기', '경계', '순매도', '긴축'];
 
 function corsHeaders(request) {
   const origin = request.headers.get('Origin') || '';
@@ -160,27 +160,97 @@ async function fetchYahooQuote(symbol) {
   }
 }
 
+async function fetchBtcPerp() {
+  // 1) Binance Futures BTCUSDT Perpetual
+  try {
+    const [tRes, fRes] = await Promise.all([
+      fetch('https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=BTCUSDT', { headers: { 'User-Agent': 'Mozilla/5.0' } }),
+      fetch('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT', { headers: { 'User-Agent': 'Mozilla/5.0' } })
+    ]);
+    if (tRes.ok) {
+      const t = await tRes.json();
+      const price = Number(t.lastPrice);
+      const pct = Number(t.priceChangePercent);
+      let funding = null;
+      if (fRes.ok) {
+        const f = await fRes.json();
+        const r = Number(f.lastFundingRate);
+        if (Number.isFinite(r)) funding = Number((r * 100).toFixed(4));
+      }
+      if (Number.isFinite(price) && price > 0) {
+        return { BTC: Math.round(price), BTC_pct: Number(pct.toFixed(2)), BTC_funding: funding, BTC_src: 'Binance' };
+      }
+    }
+  } catch (_) {}
+
+  // 2) OKX BTC-USDT-SWAP Fallback (region-block safe)
+  try {
+    const [tRes, fRes] = await Promise.all([
+      fetch('https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT-SWAP', { headers: { 'User-Agent': 'Mozilla/5.0' } }),
+      fetch('https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP', { headers: { 'User-Agent': 'Mozilla/5.0' } })
+    ]);
+    if (tRes.ok) {
+      const tj = await tRes.json();
+      const row = tj?.data?.[0];
+      const price = Number(row?.last);
+      const open24 = Number(row?.open24h);
+      const pct = open24 > 0 ? ((price / open24) - 1) * 100 : 0;
+      let funding = null;
+      if (fRes.ok) {
+        const fj = await fRes.json();
+        const r = Number(fj?.data?.[0]?.fundingRate);
+        if (Number.isFinite(r)) funding = Number((r * 100).toFixed(4));
+      }
+      if (Number.isFinite(price) && price > 0) {
+        return { BTC: Math.round(price), BTC_pct: Number(pct.toFixed(2)), BTC_funding: funding, BTC_src: 'OKX' };
+      }
+    }
+  } catch (_) {}
+
+  // 3) Yahoo Finance BTC-USD Fallback
+  const y = await fetchYahooQuote('BTC-USD');
+  if (y) return { BTC: Math.round(y.price), BTC_pct: y.pct, BTC_funding: null, BTC_src: 'Yahoo' };
+  return null;
+}
+
 function cleanXmlText(s) {
   return String(s || '')
     .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+    .replace(/<[^>]+>/g, ' ')
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;|&apos;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
     .trim();
 }
 
+async function translateEnToKo(text) {
+  try {
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ko&dt=t&q=${encodeURIComponent(text)}`;
+    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    if (!res.ok) return text;
+    const json = await res.json();
+    const parts = Array.isArray(json?.[0]) ? json[0].map(seg => seg[0] || '').join('') : '';
+    return parts.trim() || text;
+  } catch (_) {
+    return text;
+  }
+}
+
 async function fetchLiveNews(kst) {
-  const feeds = [
-    ['Yahoo Finance', 'https://finance.yahoo.com/news/rssindex'],
-    ['Google News 경제', 'https://news.google.com/rss/search?q=NASDAQ+OR+KOSPI+OR+Fed+OR+oil&hl=en-US&gl=US&ceid=US:en']
-  ];
   const items = [];
   const seen = new Set();
 
-  for (const [source, url] of feeds) {
-    if (items.length >= 6) break;
+  // 1) 국내 주요 경제지 증권·글로벌 RSS (원문 국문 + 1줄 요약)
+  const krFeeds = [
+    ['한국경제', 'https://www.hankyung.com/feed/finance'],
+    ['매일경제', 'https://www.mk.co.kr/rss/50200011/']
+  ];
+  for (const [source, url] of krFeeds) {
+    if (items.length >= 3) break;
     try {
       const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
       if (!res.ok) continue;
@@ -189,24 +259,62 @@ async function fetchLiveNews(kst) {
       for (const blk of blocks) {
         const tm = blk.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i);
         const lm = blk.match(/<link\b[^>]*>([\s\S]*?)<\/link>/i);
+        const dm = blk.match(/<description\b[^>]*>([\s\S]*?)<\/description>/i);
         const title = cleanXmlText(tm ? tm[1] : '');
         const link = cleanXmlText(lm ? lm[1] : '');
+        let summary = cleanXmlText(dm ? dm[1] : '');
+        if (summary.length > 96) summary = summary.slice(0, 95) + '…';
         if (!title || seen.has(title)) continue;
         seen.add(title);
-        items.push({ title, url: link, source });
-        if (items.length >= 6) break;
+        items.push({ title, summary, url: link, source, translated: false });
+        if (items.length >= 3) break;
       }
     } catch (_) {
       continue;
     }
   }
 
+  // 2) 미국 증시 글로벌 속보 (Yahoo Finance JSON -> 자동 국문 번역 + 한글 번역 링크)
+  try {
+    const yUrl = 'https://query1.finance.yahoo.com/v1/finance/search?q=NASDAQ+Fed+stock+market&newsCount=5&quotesCount=0';
+    const res = await fetch(yUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    if (res.ok) {
+      const json = await res.json();
+      const rawUs = [];
+      for (const n of (json.news || [])) {
+        const title = String(n.title || '').trim();
+        const link = String(n.link || '').trim();
+        const source = String(n.publisher || 'Yahoo Finance').trim();
+        if (!title || seen.has(title)) continue;
+        seen.add(title);
+        rawUs.push({ title, link, source });
+        if (items.length + rawUs.length >= 5) break;
+      }
+      const translatedList = await Promise.all(
+        rawUs.map(async u => {
+          const koTitle = await translateEnToKo(u.title);
+          const koUrl = u.link
+            ? `https://translate.google.com/translate?sl=en&tl=ko&u=${encodeURIComponent(u.link)}`
+            : '';
+          return {
+            title: koTitle,
+            summary: koTitle !== u.title ? `원문: ${u.title}` : '',
+            url: koUrl,
+            source: u.source,
+            translated: true
+          };
+        })
+      );
+      items.push(...translatedList);
+    }
+  } catch (_) {}
+
   let pos = 0;
   let neg = 0;
   for (const it of items) {
-    const low = it.title.toLowerCase();
-    for (const w of POS_WORDS) if (low.includes(w)) pos++;
-    for (const w of NEG_WORDS) if (low.includes(w)) neg++;
+    const text = `${it.title} ${it.summary || ''}`.toLowerCase();
+    for (const w of POS_WORDS) if (text.includes(w)) pos++;
+    for (const w of NEG_WORDS) if (text.includes(w)) neg++;
   }
   const total = pos + neg;
   const sentiment = total ? Math.round(((pos - neg) / total) * 100) : 0;
@@ -230,7 +338,7 @@ export default {
     }
 
     const cache = caches.default;
-    const respCacheKey = new Request('https://kis-live-cache.internal/v51/live');
+    const respCacheKey = new Request('https://kis-live-cache.internal/v52b/live');
     const cachedResp = await cache.match(respCacheKey);
     if (cachedResp) {
       const body = await cachedResp.text();
@@ -262,13 +370,14 @@ export default {
       }
     })();
 
-    const [_, nq, es, cl, gc, krw, news] = await Promise.all([
+    const [_, nq, es, cl, gc, krw, btc, news] = await Promise.all([
       kisPromise,
       fetchYahooQuote('NQ=F'),
       fetchYahooQuote('ES=F'),
       fetchYahooQuote('CL=F'),
       fetchYahooQuote('GC=F'),
       fetchYahooQuote('KRW=X'),
+      fetchBtcPerp(),
       fetchLiveNews(kst)
     ]);
 
@@ -276,6 +385,7 @@ export default {
     if (es) { futures.ES = es.price; futures.ES_pct = es.pct; }
     if (cl) { futures.CL = cl.price; futures.CL_pct = cl.pct; }
     if (gc) { futures.GC = gc.price; futures.GC_pct = gc.pct; }
+    if (btc) Object.assign(futures, btc);
     if (krw) indices.USDKRW = krw.price;
 
     const payload = JSON.stringify({
