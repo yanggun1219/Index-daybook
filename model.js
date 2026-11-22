@@ -1,8 +1,8 @@
-// 지수 관측소 v3.2 — 워크포워드 정규화 로지스틱 + 변동성 보정 밴드 + 원자재(유가·금)·선물·뉴스 연동
-// v3.1 대비 추가: WTI 유가(CL=F) 및 금 선물(GC=F) 일간 변화율 확장 지표 지원
+// 지수 관측소 v4.0 — 최근 장세 지수감쇠 가중치 + 비선형 상호작용 + 1일/5일 듀얼 호라이즌 + 고확신 신호 필터
 
 const MIN_BASE_SAMPLES = 18;
 const MIN_EXTRA_SAMPLES = 60;
+const RECENCY_HALF_LIFE = 380; // 최근 1.5년 장세에 더 높은 가중치 부여
 
 const FEATURE_META = {
   KR: [
@@ -29,7 +29,9 @@ const EXTRA_META = {
   tnx: { key: 'tnx', label: '미 국채 10년물 일간 변화', unit: '%p', min: -0.4, max: 0.4, step: 0.01 },
   dxy: { key: 'dxy', label: '달러 인덱스(DXY) 변화', unit: '%', min: -3, max: 3, step: 0.05 },
   oil: { key: 'oil', label: 'WTI 국제유가 변화', unit: '%', min: -10, max: 10, step: 0.2 },
-  gold: { key: 'gold', label: '국제 금 선물 변화', unit: '%', min: -6, max: 6, step: 0.1 }
+  gold: { key: 'gold', label: '국제 금 선물 변화', unit: '%', min: -6, max: 6, step: 0.1 },
+  usVix: { key: 'usVix', label: '나스닥×VIX 충격 상호작용', unit: '', min: -15, max: 15, step: 0.2 },
+  ret20: { key: 'ret20', label: '20거래일 중기 추세', unit: '%', min: -25, max: 25, step: 0.5 }
 };
 
 function quantile(values, p) {
@@ -104,6 +106,7 @@ function extractBaseFeatures(rows, i, marketKey, allMarkets) {
   if (!prev || !adjacent(prev, today)) return null;
 
   const ret5 = rows[i - 5][1] ? (today[1] / rows[i - 5][1] - 1) * 100 : 0;
+  const ret20 = i >= 20 && rows[i - 20][1] ? (today[1] / rows[i - 20][1] - 1) * 100 : undefined;
   const winStart = Math.max(0, i - 9);
   const rets = [];
   for (let k = winStart; k <= i; k++) rets.push(rows[k][2]);
@@ -118,24 +121,37 @@ function extractBaseFeatures(rows, i, marketKey, allMarkets) {
     usInfo = cumulativeUsReturn(allMarkets.NASDAQ || [], prev[0], today[0]);
     feats.push(fxChg, usInfo.ret);
   }
-  return { feats, vol: vol10, usDate: usInfo.usDate, usSessions: usInfo.sessions };
+  return { feats, vol: vol10, ret20, usRet: usInfo.ret, usDate: usInfo.usDate, usSessions: usInfo.sessions };
 }
 
-function fitLogisticModel(pool, d, warm) {
+function fitLogisticModel(pool, d, warm, useRecency) {
   const n = pool.length;
+  const sw = new Array(n);
+  let wSum = 0;
+  const decay = useRecency ? Math.LN2 / RECENCY_HALF_LIFE : 0;
+  for (let i = 0; i < n; i++) {
+    const wt = useRecency ? Math.exp(-decay * (n - 1 - i)) : 1;
+    sw[i] = wt;
+    wSum += wt;
+  }
+  const normFactor = n / wSum;
   let upSum = 0;
-  for (let i = 0; i < n; i++) upSum += pool[i].up;
+  for (let i = 0; i < n; i++) {
+    sw[i] *= normFactor;
+    upSum += sw[i] * pool[i].up;
+  }
   const baseRate = upSum / n;
+
   const means = new Array(d);
   const stds = new Array(d);
   for (let j = 0; j < d; j++) {
     let s = 0;
-    for (let i = 0; i < n; i++) s += pool[i].x[j];
+    for (let i = 0; i < n; i++) s += sw[i] * pool[i].x[j];
     const mean = s / n;
     let v = 0;
     for (let i = 0; i < n; i++) {
       const diff = pool[i].x[j] - mean;
-      v += diff * diff;
+      v += sw[i] * diff * diff;
     }
     means[j] = mean;
     stds[j] = Math.sqrt(v / n) || 1;
@@ -152,13 +168,13 @@ function fitLogisticModel(pool, d, warm) {
     X[i] = row;
   }
 
-  const lambda = Math.max(8, (250 / Math.sqrt(n)) * Math.sqrt(d / 6));
+  const lambda = Math.max(10, (280 / Math.sqrt(n)) * Math.sqrt(d / 6));
   const clampedBase = Math.max(0.05, Math.min(0.95, baseRate));
   const useWarm = warm && warm.w && warm.w.length === d;
   let b = useWarm ? warm.b : Math.log(clampedBase / (1 - clampedBase));
   const w = useWarm ? [...warm.w] : new Array(d).fill(0);
   const lr = 0.08;
-  const iters = useWarm ? 14 : 120;
+  const iters = useWarm ? 14 : 110;
 
   for (let iter = 0; iter < iters; iter++) {
     let gb = 0;
@@ -166,7 +182,7 @@ function fitLogisticModel(pool, d, warm) {
     for (let i = 0; i < n; i++) {
       let z = b;
       for (let j = 0; j < d; j++) z += w[j] * X[i][j];
-      const err = sigmoid(z) - pool[i].up;
+      const err = sw[i] * (sigmoid(z) - pool[i].up);
       gb += err;
       for (let j = 0; j < d; j++) gw[j] += err * X[i][j];
     }
@@ -198,7 +214,13 @@ function fitLogisticModel(pool, d, warm) {
   };
 }
 
-function predictWithModel(model, rawFeats, vol, marketKey, selectedMeta) {
+function classifySignal(p) {
+  if (p >= 0.65) return { code: 'HIGH_UP', label: '고확신 상승 신호', tone: 'teal' };
+  if (p <= 0.35) return { code: 'HIGH_DOWN', label: '고확신 하락 경계', tone: 'rose' };
+  return { code: 'NEUTRAL', label: '중립 · 관망 구간', tone: 'slate' };
+}
+
+function predictWithModel(model, rawFeats, vol, marketKey, selectedMeta, horizon) {
   const xNow = rawFeats.map((v, j) =>
     Math.max(-3, Math.min(3, (v - model.means[j]) / model.stds[j]))
   );
@@ -241,11 +263,13 @@ function predictWithModel(model, rawFeats, vol, marketKey, selectedMeta) {
   }
 
   return {
+    horizon: horizon || 1,
     n: model.n,
     p,
     down,
     base: model.baseRate,
     score,
+    signal: classifySignal(p),
     low,
     high,
     gain: model.gain,
@@ -281,28 +305,43 @@ function buildMacroMaps(data) {
   };
 }
 
-function getCandidateKeys(key) {
-  if (key === 'NASDAQ') return ['vix', 'tnx', 'dxy', 'oil', 'gold'];
-  return [key === 'KOSPI' ? 'sox' : 'breadth', 'flow', 'vix', 'oil', 'gold'];
+function getCandidateKeys(key, horizon) {
+  if (key === 'NASDAQ') {
+    return horizon === 5 ? ['vix', 'tnx', 'dxy', 'ret20', 'oil', 'gold'] : ['vix', 'tnx', 'dxy', 'oil', 'gold'];
+  }
+  if (key === 'KOSPI') {
+    return horizon === 5
+      ? ['sox', 'vix', 'ret20', 'oil', 'gold']
+      : ['sox', 'vix', 'usVix', 'flow', 'oil', 'gold'];
+  }
+  return horizon === 5
+    ? ['vix', 'ret20', 'oil', 'gold']
+    : ['breadth', 'flow', 'vix', 'oil', 'gold'];
 }
 
-function makeExtraRecord(refUsDate, breadth, flow, maps) {
+function makeExtraRecord(refUsDate, breadth, flow, maps, current) {
+  const vixVal = refUsDate ? maps.vixMap.get(refUsDate) : undefined;
+  const usVix =
+    Number.isFinite(vixVal) && current && Number.isFinite(current.usRet)
+      ? current.usRet * (vixVal / 20)
+      : undefined;
   return {
     sox: refUsDate ? maps.soxSpreads.get(refUsDate) : undefined,
     breadth: Number.isFinite(breadth) ? breadth : undefined,
     flow: Number.isFinite(flow) ? flow : undefined,
-    vix: refUsDate ? maps.vixMap.get(refUsDate) : undefined,
+    vix: vixVal,
     tnx: refUsDate ? maps.tnxDiff.get(refUsDate) : undefined,
     dxy: refUsDate ? maps.dxyPct.get(refUsDate) : undefined,
     oil: refUsDate ? maps.oilPct.get(refUsDate) : undefined,
-    gold: refUsDate ? maps.goldPct.get(refUsDate) : undefined
+    gold: refUsDate ? maps.goldPct.get(refUsDate) : undefined,
+    usVix,
+    ret20: current ? current.ret20 : undefined
   };
 }
 
 function selectActiveExtras(candidates, extra, pool) {
   const minRequired = Math.max(MIN_EXTRA_SAMPLES, Math.ceil(pool.length * 0.75));
   const available = candidates.filter(k => Number.isFinite(extra[k]));
-  // Keep every candidate that individually meets the coverage gate, then check joint coverage
   const qualifying = available.filter(k => {
     let cnt = 0;
     for (let i = 0; i < pool.length; i++) if (Number.isFinite(pool[i].extra[k])) cnt++;
@@ -311,22 +350,28 @@ function selectActiveExtras(candidates, extra, pool) {
   if (qualifying.length) {
     const jointEligible = pool.filter(row => qualifying.every(k => Number.isFinite(row.extra[k])));
     if (jointEligible.length >= minRequired) {
-      return { keys: qualifying, eligible: jointEligible, blockedReason: '' };
+      return { keys: qualifying, eligible: jointEligible };
     }
-    // Fall back to first single qualifying feature
     const first = [qualifying[0]];
     const singleEligible = pool.filter(row => Number.isFinite(row.extra[first[0]]));
-    return { keys: first, eligible: singleEligible, blockedReason: '' };
+    return { keys: first, eligible: singleEligible };
   }
-  const blockedReason = available.length
-    ? '일부 확장 지표의 표본이 최소 기준(' + minRequired + '일) 미만이어서 과적합 방지를 위해 제외했습니다.'
-    : '';
-  return { keys: [], eligible: pool, blockedReason };
+  return { keys: [], eligible: pool };
 }
 
-function buildHistories(rows, key, data) {
+function forwardReturn(rows, i, horizon) {
+  if (i + horizon >= rows.length) return null;
+  if (horizon === 1) return adjacent(rows[i], rows[i + 1]) ? rows[i + 1][2] : null;
+  // For 5-day horizon, ensure calendar gap <= 14 days
+  const days = (Date.parse(rows[i + horizon][0]) - Date.parse(rows[i][0])) / 86400000;
+  if (days > 14 || !rows[i][1]) return null;
+  return (rows[i + horizon][1] / rows[i][1] - 1) * 100;
+}
+
+function buildHistories(rows, key, data, horizon) {
+  const h = horizon || 1;
   const baseMeta = key === 'NASDAQ' ? FEATURE_META.US : FEATURE_META.KR;
-  const candidates = getCandidateKeys(key);
+  const candidates = getCandidateKeys(key, h);
   const maps = buildMacroMaps(data);
 
   const base = [];
@@ -336,21 +381,29 @@ function buildHistories(rows, key, data) {
   let prevExtModel = null;
   let prevExtSig = '';
 
+  // Pending buffer prevents overlapping target leakage for horizon > 1 (e.g. 5-day return is only known 5 days later)
+  const pending = [];
+
   for (let i = 0; i < rows.length; i++) {
+    while (pending.length && pending[0].readyIdx <= i) {
+      pool.push(pending.shift().item);
+    }
+
     const [date, , , , breadth, flow] = rows[i];
     const current = extractBaseFeatures(rows, i, key, data);
     const refUsDate = key === 'NASDAQ' ? date : current ? current.usDate : null;
-    const extra = makeExtraRecord(refUsDate, breadth, flow, maps);
+    const extra = makeExtraRecord(refUsDate, breadth, flow, maps, current);
 
     let f = null;
     let g = null;
     if (current && pool.length >= MIN_BASE_SAMPLES) {
-      const baseModel = fitLogisticModel(pool, baseMeta.length, prevBaseModel);
+      const baseModel = fitLogisticModel(pool, baseMeta.length, prevBaseModel, false);
       prevBaseModel = baseModel;
-      f = predictWithModel(baseModel, current.feats, current.vol, key, baseMeta);
+      f = predictWithModel(baseModel, current.feats, current.vol, key, baseMeta, h);
       g = f;
 
       const sel = selectActiveExtras(candidates, extra, pool);
+      const useRecency = h === 5 || key === 'KOSPI';
       if (sel.keys.length) {
         const training = sel.eligible.map(row => ({
           ...row,
@@ -358,7 +411,12 @@ function buildHistories(rows, key, data) {
         }));
         const meta = baseMeta.concat(sel.keys.map(k => EXTRA_META[k]));
         const sig = sel.keys.join('+');
-        const extModel = fitLogisticModel(training, meta.length, sig === prevExtSig ? prevExtModel : null);
+        const extModel = fitLogisticModel(
+          training,
+          meta.length,
+          sig === prevExtSig ? prevExtModel : null,
+          useRecency
+        );
         prevExtModel = extModel;
         prevExtSig = sig;
         g = predictWithModel(
@@ -366,8 +424,12 @@ function buildHistories(rows, key, data) {
           current.feats.concat(sel.keys.map(k => extra[k])),
           current.vol,
           key,
-          meta
+          meta,
+          h
         );
+      } else if (useRecency) {
+        const recModel = fitLogisticModel(pool, baseMeta.length, null, true);
+        g = predictWithModel(recModel, current.feats, current.vol, key, baseMeta, h);
       }
 
       g = {
@@ -376,53 +438,58 @@ function buildHistories(rows, key, data) {
         usSessions: current.usSessions,
         extra,
         active: sel.keys,
-        candidates,
-        blockedReason: sel.blockedReason
+        candidates
       };
     }
 
     base.push(f);
     enhanced.push(g);
 
-    if (current && adjacent(rows[i], rows[i + 1])) {
-      const y = rows[i + 1][2];
-      pool.push({ x: current.feats, vol: current.vol, y, up: Number(y > 0), extra });
+    const y = forwardReturn(rows, i, h);
+    if (current && y !== null) {
+      pending.push({
+        readyIdx: i + h,
+        item: { x: current.feats, vol: current.vol, y, up: Number(y > 0), extra }
+      });
     }
   }
   return { base, enhanced };
 }
 
-function forecastSingleDay(rows, targetIdx, key, data) {
+function forecastSingleDay(rows, targetIdx, key, data, horizon) {
+  const h = horizon || 1;
   const baseMeta = key === 'NASDAQ' ? FEATURE_META.US : FEATURE_META.KR;
-  const candidates = getCandidateKeys(key);
+  const candidates = getCandidateKeys(key, h);
   const maps = buildMacroMaps(data);
 
   const current = extractBaseFeatures(rows, targetIdx, key, data);
   if (!current) return null;
 
   const pool = [];
-  for (let i = 5; i < targetIdx; i++) {
+  // Strict no-leakage cutoff: training sample's outcome (i + h) must be <= targetIdx
+  for (let i = 5; i <= targetIdx - h; i++) {
     const f = extractBaseFeatures(rows, i, key, data);
-    if (!f || !adjacent(rows[i], rows[i + 1])) continue;
+    const y = forwardReturn(rows, i, h);
+    if (!f || y === null) continue;
     const [date, , , , breadth, flow] = rows[i];
     const refUs = key === 'NASDAQ' ? date : f.usDate;
-    const y = rows[i + 1][2];
     pool.push({
       x: f.feats,
       vol: f.vol,
       y,
       up: Number(y > 0),
-      extra: makeExtraRecord(refUs, breadth, flow, maps)
+      extra: makeExtraRecord(refUs, breadth, flow, maps, f)
     });
   }
   if (pool.length < MIN_BASE_SAMPLES) return null;
 
   const [curDate, , , , curBreadth, curFlow] = rows[targetIdx];
   const refUsDate = key === 'NASDAQ' ? curDate : current.usDate;
-  const extra = makeExtraRecord(refUsDate, curBreadth, curFlow, maps);
+  const extra = makeExtraRecord(refUsDate, curBreadth, curFlow, maps, current);
 
-  const baseModel = fitLogisticModel(pool, baseMeta.length);
-  let g = predictWithModel(baseModel, current.feats, current.vol, key, baseMeta);
+  const useRecency = h === 5 || key === 'KOSPI';
+  const baseModel = fitLogisticModel(pool, baseMeta.length, null, useRecency);
+  let g = predictWithModel(baseModel, current.feats, current.vol, key, baseMeta, h);
 
   const sel = selectActiveExtras(candidates, extra, pool);
   if (sel.keys.length) {
@@ -431,13 +498,14 @@ function forecastSingleDay(rows, targetIdx, key, data) {
       x: row.x.concat(sel.keys.map(k => row.extra[k]))
     }));
     const meta = baseMeta.concat(sel.keys.map(k => EXTRA_META[k]));
-    const extModel = fitLogisticModel(training, meta.length);
+    const extModel = fitLogisticModel(training, meta.length, null, useRecency);
     g = predictWithModel(
       extModel,
       current.feats.concat(sel.keys.map(k => extra[k])),
       current.vol,
       key,
-      meta
+      meta,
+      h
     );
   }
 
@@ -447,8 +515,7 @@ function forecastSingleDay(rows, targetIdx, key, data) {
     usSessions: current.usSessions,
     extra,
     active: sel.keys,
-    candidates,
-    blockedReason: sel.blockedReason
+    candidates
   };
 }
 
