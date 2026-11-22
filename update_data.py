@@ -1,8 +1,8 @@
 """
-지수 관측소 v3.2 — 일간 시세·원자재·선물·글로벌 뉴스 자동 수집 스크립트
+지수 관측소 v4.1 — 일간 시세·원자재·선물·유럽장(DAX)·변동성 기간구조(VIX3M)·글로벌 뉴스 자동 수집 스크립트
 - 실행: python3 update_data.py --years 5 --krx-days 30
 - 수집 항목:
-  * 국내·미국 지수 및 매크로: ^KS11, ^KQ11, ^IXIC, KRW=X, ^SOX, ^VIX, ^TNX, DX-Y.NYB
+  * 국내·미국 지수 및 매크로: ^KS11, ^KQ11, ^IXIC, KRW=X, ^SOX, ^VIX, ^VIX3M, ^TNX, DX-Y.NYB, ^GDAXI
   * 원자재 5년 일봉: WTI 국제유가(CL=F), 국제 금 선물(GC=F)
   * 장전 실시간 선물 스냅샷: 나스닥100 선물(NQ=F), S&P500 선물(ES=F), WTI(CL=F), 금(GC=F)
   * 글로벌 주요 경제 뉴스 RSS 헤드라인 및 간이 심리 점수(-100 ~ +100)
@@ -10,7 +10,6 @@
 import argparse
 import json
 import math
-import os
 import time
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -43,6 +42,14 @@ def fetch_series(ticker: str, years: int = 5):
             continue
         out[d_str] = (round(float(val), 2), round(float(p_val), 4))
     return out
+
+
+def fetch_optional_series(ticker: str, years: int = 5):
+    try:
+        return fetch_series(ticker, years=years)
+    except Exception as exc:
+        print(f"선택 지표 건너뜀({ticker}): {exc}")
+        return {}
 
 
 def fetch_live_futures():
@@ -170,10 +177,12 @@ def main():
     usdkrw = fetch_series("KRW=X", years=args.years)
     sox = fetch_series("^SOX", years=args.years)
     vix = fetch_series("^VIX", years=args.years)
+    vix3m = fetch_optional_series("^VIX3M", years=args.years)
     tnx = fetch_series("^TNX", years=args.years)
     dxy = fetch_series("DX-Y.NYB", years=args.years)
-    oil = fetch_series("CL=F", years=args.years)
-    gold = fetch_series("GC=F", years=args.years)
+    oil = fetch_optional_series("CL=F", years=args.years)
+    gold = fetch_optional_series("GC=F", years=args.years)
+    dax = fetch_optional_series("^GDAXI", years=args.years)
 
     data_path = Path(__file__).with_name("data.js")
     saved = {}
@@ -181,6 +190,7 @@ def main():
         saved = json.loads(data_path.read_text(encoding="utf-8").split("=", 1)[1].strip().rstrip(";"))
 
     fx_dates = sorted(usdkrw.keys())
+
     def latest_fx(d_str: str):
         prev = None
         for fd in fx_dates:
@@ -207,10 +217,12 @@ def main():
         "NASDAQ": [[d, nasdaq[d][0], nasdaq[d][1]] for d in sorted(nasdaq)],
         "SOX": [[d, sox[d][0]] for d in sorted(sox)],
         "VIX": [[d, vix[d][0]] for d in sorted(vix)],
+        "VIX3M": [[d, vix3m[d][0]] for d in sorted(vix3m)],
         "TNX": [[d, tnx[d][0]] for d in sorted(tnx)],
         "DXY": [[d, dxy[d][0]] for d in sorted(dxy)],
         "CL": [[d, oil[d][0]] for d in sorted(oil)],
         "GC": [[d, gold[d][0]] for d in sorted(gold)],
+        "DAX": [[d, dax[d][0]] for d in sorted(dax)],
         "FUTURES": fetch_live_futures(),
         "NEWS": fetch_global_news(),
     }
@@ -219,7 +231,7 @@ def main():
     with temp.open("w", encoding="utf-8") as f:
         f.write("const markets = " + json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + ";\n")
     temp.replace(data_path)
-    print(f"Updated v3.2 data.js -> KOSPI:{len(payload['KOSPI'])}, CL:{len(payload['CL'])}, NEWS:{len(payload['NEWS']['items'])}")
+    print(f"Updated v4.1 data.js -> KOSPI:{len(payload['KOSPI'])}, VIX3M:{len(payload['VIX3M'])}, DAX:{len(payload['DAX'])}, NEWS:{len(payload['NEWS']['items'])}")
 
 
 if __name__ == "__main__":

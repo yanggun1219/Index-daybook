@@ -1,4 +1,4 @@
-// 지수 관측소 v4.0 — 듀얼 호라이즌(1일·5일) + 고확신 신호 필터 + 선물·원자재·뉴스 모바일 앱
+// 지수 관측소 v4.1 — 듀얼 호라이즌(1일·5일) + 고확신 신호 필터 + 선물·원자재·뉴스 모바일 앱
 
 const MARKET_NAMES = {
   KOSPI: '코스피',
@@ -266,9 +266,10 @@ function renderForecast() {
     ? '<section class="mt-3 rounded-2xl bg-white border border-slate-200 p-4 shadow-sm">' +
       '<div class="flex items-center justify-between mb-1.5">' +
       '<h2 class="text-sm font-bold text-slate-900">확장 지표 상태</h2>' +
-      '<span class="text-xs text-slate-500">미국장 ' +
-      (f.usDate || '미수록') +
-      (f.usSessions > 1 ? ' (' + f.usSessions + '일 누적)' : '') +
+      '<span class="text-xs text-slate-500">' +
+      (state.key === 'NASDAQ' && f.krLeadDate
+        ? '한국장 선행 ' + f.krLeadDate + ' 반영'
+        : '미국장 ' + (f.usDate || '미수록') + (f.usSessions > 1 ? ' (' + f.usSessions + '일 누적)' : '')) +
       '</span>' +
       '</div>' +
       '<div class="divide-y divide-slate-100">' +
@@ -353,7 +354,7 @@ function renderForecast() {
     MARKET_NAMES[state.key] +
     ' ' +
     horizonLabel +
-    ' (v4.0)</span>' +
+    ' (v4.1)</span>' +
     '<div class="flex items-center gap-1.5">' +
     '<span class="text-[11px] px-2 py-0.5 rounded-full ' +
     regimeBadgeClass +
@@ -573,7 +574,9 @@ function renderSimulator() {
     state.simValues = [...f.rawFeats];
   }
 
-  const simOut = predictWithModel(f.modelRef, state.simValues, state.simValues[3], state.key, meta, state.horizon);
+  const volIdx = meta.findIndex(m => m.key === 'vol10');
+  const getSimVol = () => (volIdx >= 0 ? state.simValues[volIdx] : f.vol);
+  const simOut = predictWithModel(f.modelRef, state.simValues, getSimVol(), state.key, meta, state.horizon);
   const diffP = (simOut.p - f.p) * 100;
 
   const slidersHtml = meta
@@ -654,7 +657,7 @@ function renderSimulator() {
     input.addEventListener('input', e => {
       const idx = Number(e.target.dataset.idx);
       state.simValues[idx] = Number(e.target.value);
-      const updated = predictWithModel(f.modelRef, state.simValues, state.simValues[3], state.key, meta, state.horizon);
+      const updated = predictWithModel(f.modelRef, state.simValues, getSimVol(), state.key, meta, state.horizon);
       const m = meta[idx];
       document.getElementById('sim-val-' + idx).textContent =
         (state.simValues[idx] > 0 && m.key !== 'vol10' && m.key !== 'vix' && m.key !== 'breadth' ? '+' : '') +
@@ -711,17 +714,25 @@ function renderBacktest() {
   const covV2 = avg(pairs, v => Number(v.y >= v.p2.low && v.y <= v.p2.high));
   const covV1 = state.horizon === 1 ? avg(pairs, v => Number(v.y >= v.p1.low && v.y <= v.p1.high)) : null;
 
-  // 고확신 구간 (>= 65% 또는 <= 35%) 선별 성적표
-  const hiPairs = pairs.filter(v => v.p4.p >= 0.65 || v.p4.p <= 0.35);
-  const hiAcc = avg(hiPairs, v => Number((v.p4.p >= 0.5) === (v.y > 0)));
-  const hiBrier = avg(hiPairs, v => (v.p4.p - Number(v.y > 0)) ** 2);
+  // 시장별 고확신 구간 선별 성적표 (코스피·코스닥 65%/35%, 나스닥 60%/40%, 최소 20일 표본 가드)
+  const thr = getConvictionThreshold(state.key);
+  const thrHiPct = Math.round(thr * 100);
+  const thrLoPct = Math.round((1 - thr) * 100);
+  const hiPairs = pairs.filter(v => v.p4.p >= thr || v.p4.p <= 1 - thr);
+  const hasEnoughHi = hiPairs.length >= MIN_CONVICTION_SAMPLES;
+  const hiAcc = hasEnoughHi ? avg(hiPairs, v => Number((v.p4.p >= 0.5) === (v.y > 0))) : null;
+  const hiBrier = hasEnoughHi ? avg(hiPairs, v => (v.p4.p - Number(v.y > 0)) ** 2) : null;
 
   const fmtB = x => (x === null ? '-' : x.toFixed(4));
 
   container.innerHTML =
     '<section class="rounded-2xl bg-slate-900 text-white p-4 shadow-sm">' +
     '<div class="flex items-center justify-between mb-2">' +
-    '<h2 class="text-sm font-bold text-white">고확신 신호(65%↑ / 35%↓) 선별 성적표</h2>' +
+    '<h2 class="text-sm font-bold text-white">고확신 신호(' +
+    thrHiPct +
+    '%↑ / ' +
+    thrLoPct +
+    '%↓) 선별 성적표</h2>' +
     '<span class="text-[11px] px-2 py-0.5 rounded-full bg-slate-800 text-emerald-300 tabular-nums">' +
     hiPairs.length +
     '회 발생</span>' +
@@ -730,17 +741,21 @@ function renderBacktest() {
     '<div class="rounded-xl bg-slate-800/80 p-3">' +
     '<div class="text-[11px] text-slate-400">고확신 구간 실제 방향 적중률</div>' +
     '<div class="text-2xl font-bold text-emerald-300 mt-0.5">' +
-    (hiPairs.length ? fmtPct(hiAcc) : '사례 없음') +
+    (hasEnoughHi ? fmtPct(hiAcc) : '표본 부족') +
     '</div>' +
     '</div>' +
     '<div class="rounded-xl bg-slate-800/80 p-3">' +
     '<div class="text-[11px] text-slate-400">고확신 구간 브라이어 점수</div>' +
     '<div class="text-2xl font-bold text-white mt-0.5">' +
-    fmtB(hiBrier) +
+    (hasEnoughHi ? fmtB(hiBrier) : '관망 권장') +
     '</div>' +
     '</div>' +
     '</div>' +
-    '<p class="mt-2 text-[11px] text-slate-400">방향성이 뚜렷하지 않은 35~65% 관망 구간을 제외하고, 모델이 강한 확신을 보인 날만 집계한 실전 성적입니다.</p>' +
+    '<p class="mt-2 text-[11px] text-slate-400">방향성이 모호한 ' +
+    thrLoPct +
+    '~' +
+    thrHiPct +
+    '% 관망 구간을 제외하고, 20회 이상 검증된 고확신 신호만 집계합니다.</p>' +
     '</section>' +
     '<section class="mt-3 rounded-2xl bg-white border border-slate-200 p-4 shadow-sm">' +
     '<div class="flex items-center justify-between mb-2">' +
@@ -761,7 +776,7 @@ function renderBacktest() {
     '</tr></thead>' +
     '<tbody class="divide-y divide-slate-100 tabular-nums">' +
     '<tr class="bg-teal-50/50 font-semibold text-slate-900">' +
-    '<td class="py-2.5 pr-2">개선 v4.0 (시간감쇠·비선형)</td>' +
+    '<td class="py-2.5 pr-2">개선 v4.1 (시장별 전용 엔진)</td>' +
     '<td class="py-2.5 px-2 text-right text-teal-800">' +
     fmtB(brierV4) +
     '</td>' +
@@ -836,7 +851,7 @@ function handleFileImport(event) {
         validateImport(parsed);
         state.marketsData = { ...state.marketsData, ...parsed };
         recomputeMarket(state.key, false);
-        showToast('데이터를 반영해 v4.0 전체 모델을 재계산했습니다.');
+        showToast('데이터를 반영해 v4.1 전체 모델을 재계산했습니다.');
       } else {
         const lines = text
           .split(/\r?\n/)

@@ -1,8 +1,9 @@
-// 지수 관측소 v4.0 — 최근 장세 지수감쇠 가중치 + 비선형 상호작용 + 1일/5일 듀얼 호라이즌 + 고확신 신호 필터
+// 지수 관측소 v4.1 — 나스닥 한국장 선행 잔차 + 전용 정규화 + VIX3M·DAX 확장 + 1일/5일 듀얼 호라이즌
 
 const MIN_BASE_SAMPLES = 18;
 const MIN_EXTRA_SAMPLES = 60;
-const RECENCY_HALF_LIFE = 380; // 최근 1.5년 장세에 더 높은 가중치 부여
+const MIN_CONVICTION_SAMPLES = 20;
+const RECENCY_HALF_LIFE = 380; // 최근 1.5년 장세에 더 높은 가중치 부여 (코스피/5일)
 
 const FEATURE_META = {
   KR: [
@@ -26,13 +27,21 @@ const EXTRA_META = {
   breadth: { key: 'breadth', label: '코스닥 상승 종목 비율', unit: '%', min: 0, max: 100, step: 0.5 },
   flow: { key: 'flow', label: '외국인 현물 순매수 강도', unit: '%', min: -25, max: 25, step: 0.1 },
   vix: { key: 'vix', label: 'VIX 변동성 지수', unit: 'pt', min: 10, max: 60, step: 0.5 },
+  vixRatio: { key: 'vixRatio', label: 'VIX / VIX3M 기간구조', unit: 'x', min: 0.6, max: 1.5, step: 0.02 },
   tnx: { key: 'tnx', label: '미 국채 10년물 일간 변화', unit: '%p', min: -0.4, max: 0.4, step: 0.01 },
   dxy: { key: 'dxy', label: '달러 인덱스(DXY) 변화', unit: '%', min: -3, max: 3, step: 0.05 },
   oil: { key: 'oil', label: 'WTI 국제유가 변화', unit: '%', min: -10, max: 10, step: 0.2 },
   gold: { key: 'gold', label: '국제 금 선물 변화', unit: '%', min: -6, max: 6, step: 0.1 },
   usVix: { key: 'usVix', label: '나스닥×VIX 충격 상호작용', unit: '', min: -15, max: 15, step: 0.2 },
-  ret20: { key: 'ret20', label: '20거래일 중기 추세', unit: '%', min: -25, max: 25, step: 0.5 }
+  ret20: { key: 'ret20', label: '20거래일 중기 추세', unit: '%', min: -25, max: 25, step: 0.5 },
+  krLead: { key: 'krLead', label: '한국장(코스피) 장전 등락', unit: '%', min: -8, max: 8, step: 0.1 },
+  krResid: { key: 'krResid', label: '코스피 장전 독자 변동분', unit: '%p', min: -6, max: 6, step: 0.1 },
+  dax: { key: 'dax', label: '유럽장(독일 DAX) 등락', unit: '%', min: -8, max: 8, step: 0.1 }
 };
+
+function getConvictionThreshold(marketKey) {
+  return marketKey === 'NASDAQ' ? 0.60 : 0.65;
+}
 
 function quantile(values, p) {
   if (!values || !values.length) return null;
@@ -99,6 +108,25 @@ function buildDiffMap(series, isPct) {
   return map;
 }
 
+function findPreUsKoreaSession(nasdaqDate, nextNasdaqDate, maps) {
+  if (nextNasdaqDate) {
+    const ret = maps.kospiByDate.get(nextNasdaqDate);
+    if (Number.isFinite(ret)) return { ret, krDate: nextNasdaqDate };
+    return { ret: undefined, krDate: null };
+  }
+  // 최신일 실시간 예측: 미국 전일 종가(nasdaqDate) 이후 먼저 마감한 한국장 세션 탐색 (최대 5일 이내)
+  const dates = maps.kospiDates;
+  for (let i = dates.length - 1; i >= 0; i--) {
+    const d = dates[i];
+    if (d <= nasdaqDate) break;
+    const gap = (Date.parse(d) - Date.parse(nasdaqDate)) / 86400000;
+    if (gap > 0 && gap <= 5) {
+      return { ret: maps.kospiByDate.get(d), krDate: d };
+    }
+  }
+  return { ret: undefined, krDate: null };
+}
+
 function extractBaseFeatures(rows, i, marketKey, allMarkets) {
   if (i < 5) return null;
   const today = rows[i];
@@ -121,10 +149,18 @@ function extractBaseFeatures(rows, i, marketKey, allMarkets) {
     usInfo = cumulativeUsReturn(allMarkets.NASDAQ || [], prev[0], today[0]);
     feats.push(fxChg, usInfo.ret);
   }
-  return { feats, vol: vol10, ret20, usRet: usInfo.ret, usDate: usInfo.usDate, usSessions: usInfo.sessions };
+  return {
+    feats,
+    vol: vol10,
+    ret1: today[2],
+    ret20,
+    usRet: usInfo.ret,
+    usDate: usInfo.usDate,
+    usSessions: usInfo.sessions
+  };
 }
 
-function fitLogisticModel(pool, d, warm, useRecency) {
+function fitLogisticModel(pool, d, warm, useRecency, l2Floor) {
   const n = pool.length;
   const sw = new Array(n);
   let wSum = 0;
@@ -168,7 +204,7 @@ function fitLogisticModel(pool, d, warm, useRecency) {
     X[i] = row;
   }
 
-  const lambda = Math.max(10, (280 / Math.sqrt(n)) * Math.sqrt(d / 6));
+  const baseLambda = Math.max(l2Floor || 10, (280 / Math.sqrt(n)) * Math.sqrt(d / 6));
   const clampedBase = Math.max(0.05, Math.min(0.95, baseRate));
   const useWarm = warm && warm.w && warm.w.length === d;
   let b = useWarm ? warm.b : Math.log(clampedBase / (1 - clampedBase));
@@ -188,7 +224,7 @@ function fitLogisticModel(pool, d, warm, useRecency) {
     }
     b -= lr * (gb / n);
     for (let j = 0; j < d; j++) {
-      w[j] -= lr * (gw[j] / n + (lambda / n) * w[j]);
+      w[j] -= lr * (gw[j] / n + (baseLambda / n) * w[j]);
     }
   }
 
@@ -214,9 +250,10 @@ function fitLogisticModel(pool, d, warm, useRecency) {
   };
 }
 
-function classifySignal(p) {
-  if (p >= 0.65) return { code: 'HIGH_UP', label: '고확신 상승 신호', tone: 'teal' };
-  if (p <= 0.35) return { code: 'HIGH_DOWN', label: '고확신 하락 경계', tone: 'rose' };
+function classifySignal(p, marketKey) {
+  const thr = getConvictionThreshold(marketKey);
+  if (p >= thr) return { code: 'HIGH_UP', label: '고확신 상승 신호', tone: 'teal' };
+  if (p <= 1 - thr) return { code: 'HIGH_DOWN', label: '고확신 하락 경계', tone: 'rose' };
   return { code: 'NEUTRAL', label: '중립 · 관망 구간', tone: 'slate' };
 }
 
@@ -269,7 +306,7 @@ function predictWithModel(model, rawFeats, vol, marketKey, selectedMeta, horizon
     down,
     base: model.baseRate,
     score,
-    signal: classifySignal(p),
+    signal: classifySignal(p, marketKey),
     low,
     high,
     gain: model.gain,
@@ -295,19 +332,32 @@ function buildMacroMaps(data) {
     const close = soxMap.get(date);
     if (prev > 0 && close > 0) soxSpreads.set(date, (close / prev - 1) * 100 - ret);
   }
+  const kospiRows = data.KOSPI || [];
+  const kospiByDate = new Map();
+  const kospiDates = [];
+  for (let i = 0; i < kospiRows.length; i++) {
+    kospiByDate.set(kospiRows[i][0], kospiRows[i][2]);
+    kospiDates.push(kospiRows[i][0]);
+  }
   return {
     soxSpreads,
     vixMap: new Map(data.VIX || []),
+    vix3mMap: new Map(data.VIX3M || []),
     tnxDiff: buildDiffMap(data.TNX || [], false),
     dxyPct: buildDiffMap(data.DXY || [], true),
     oilPct: buildDiffMap(data.CL || [], true),
-    goldPct: buildDiffMap(data.GC || [], true)
+    goldPct: buildDiffMap(data.GC || [], true),
+    daxPct: buildDiffMap(data.DAX || [], true),
+    kospiByDate,
+    kospiDates
   };
 }
 
 function getCandidateKeys(key, horizon) {
   if (key === 'NASDAQ') {
-    return horizon === 5 ? ['vix', 'tnx', 'dxy', 'ret20', 'oil', 'gold'] : ['vix', 'tnx', 'dxy', 'oil', 'gold'];
+    return horizon === 5
+      ? ['vix', 'vixRatio', 'tnx', 'dxy', 'ret20', 'oil', 'gold']
+      : ['krLead', 'krResid', 'vixRatio', 'dax', 'vix', 'tnx', 'dxy'];
   }
   if (key === 'KOSPI') {
     return horizon === 5
@@ -319,28 +369,51 @@ function getCandidateKeys(key, horizon) {
     : ['breadth', 'flow', 'vix', 'oil', 'gold'];
 }
 
-function makeExtraRecord(refUsDate, breadth, flow, maps, current) {
+function makeExtraRecord(refUsDate, breadth, flow, maps, current, key, nextUsDate) {
   const vixVal = refUsDate ? maps.vixMap.get(refUsDate) : undefined;
+  const vix3mVal = refUsDate ? maps.vix3mMap.get(refUsDate) : undefined;
+  const vixRatio =
+    Number.isFinite(vixVal) && Number.isFinite(vix3mVal) && vix3mVal > 0
+      ? vixVal / vix3mVal
+      : undefined;
   const usVix =
     Number.isFinite(vixVal) && current && Number.isFinite(current.usRet)
       ? current.usRet * (vixVal / 20)
       : undefined;
+
+  let krLead;
+  let krResid;
+  let krLeadDate = null;
+  if (key === 'NASDAQ' && refUsDate) {
+    const kr = findPreUsKoreaSession(refUsDate, nextUsDate, maps);
+    if (Number.isFinite(kr.ret)) {
+      krLead = kr.ret;
+      krResid = current && Number.isFinite(current.ret1) ? kr.ret - 0.55 * current.ret1 : kr.ret;
+      krLeadDate = kr.krDate;
+    }
+  }
+
   return {
     sox: refUsDate ? maps.soxSpreads.get(refUsDate) : undefined,
     breadth: Number.isFinite(breadth) ? breadth : undefined,
     flow: Number.isFinite(flow) ? flow : undefined,
     vix: vixVal,
+    vixRatio,
     tnx: refUsDate ? maps.tnxDiff.get(refUsDate) : undefined,
     dxy: refUsDate ? maps.dxyPct.get(refUsDate) : undefined,
     oil: refUsDate ? maps.oilPct.get(refUsDate) : undefined,
     gold: refUsDate ? maps.goldPct.get(refUsDate) : undefined,
+    dax: refUsDate ? maps.daxPct.get(refUsDate) : undefined,
     usVix,
-    ret20: current ? current.ret20 : undefined
+    ret20: current ? current.ret20 : undefined,
+    krLead,
+    krResid,
+    _krLeadDate: krLeadDate
   };
 }
 
 function selectActiveExtras(candidates, extra, pool) {
-  const minRequired = Math.max(MIN_EXTRA_SAMPLES, Math.ceil(pool.length * 0.75));
+  const minRequired = Math.max(MIN_EXTRA_SAMPLES, Math.ceil(pool.length * 0.72));
   const available = candidates.filter(k => Number.isFinite(extra[k]));
   const qualifying = available.filter(k => {
     let cnt = 0;
@@ -362,10 +435,16 @@ function selectActiveExtras(candidates, extra, pool) {
 function forwardReturn(rows, i, horizon) {
   if (i + horizon >= rows.length) return null;
   if (horizon === 1) return adjacent(rows[i], rows[i + 1]) ? rows[i + 1][2] : null;
-  // For 5-day horizon, ensure calendar gap <= 14 days
   const days = (Date.parse(rows[i + horizon][0]) - Date.parse(rows[i][0])) / 86400000;
   if (days > 14 || !rows[i][1]) return null;
   return (rows[i + horizon][1] / rows[i][1] - 1) * 100;
+}
+
+function getModelHyperparams(key, horizon) {
+  if (key === 'NASDAQ' && horizon === 1) {
+    return { useRecency: false, l2Floor: 55 };
+  }
+  return { useRecency: horizon === 5 || key === 'KOSPI', l2Floor: 10 };
 }
 
 function buildHistories(rows, key, data, horizon) {
@@ -373,6 +452,7 @@ function buildHistories(rows, key, data, horizon) {
   const baseMeta = key === 'NASDAQ' ? FEATURE_META.US : FEATURE_META.KR;
   const candidates = getCandidateKeys(key, h);
   const maps = buildMacroMaps(data);
+  const hp = getModelHyperparams(key, h);
 
   const base = [];
   const enhanced = [];
@@ -381,7 +461,6 @@ function buildHistories(rows, key, data, horizon) {
   let prevExtModel = null;
   let prevExtSig = '';
 
-  // Pending buffer prevents overlapping target leakage for horizon > 1 (e.g. 5-day return is only known 5 days later)
   const pending = [];
 
   for (let i = 0; i < rows.length; i++) {
@@ -390,45 +469,49 @@ function buildHistories(rows, key, data, horizon) {
     }
 
     const [date, , , , breadth, flow] = rows[i];
+    const nextUsDate = i + 1 < rows.length ? rows[i + 1][0] : null;
     const current = extractBaseFeatures(rows, i, key, data);
     const refUsDate = key === 'NASDAQ' ? date : current ? current.usDate : null;
-    const extra = makeExtraRecord(refUsDate, breadth, flow, maps, current);
+    const extra = makeExtraRecord(refUsDate, breadth, flow, maps, current, key, nextUsDate);
 
     let f = null;
     let g = null;
     if (current && pool.length >= MIN_BASE_SAMPLES) {
-      const baseModel = fitLogisticModel(pool, baseMeta.length, prevBaseModel, false);
+      const baseModel = fitLogisticModel(pool, baseMeta.length, prevBaseModel, false, 10);
       prevBaseModel = baseModel;
       f = predictWithModel(baseModel, current.feats, current.vol, key, baseMeta, h);
       g = f;
 
       const sel = selectActiveExtras(candidates, extra, pool);
-      const useRecency = h === 5 || key === 'KOSPI';
       if (sel.keys.length) {
+        const isNasdaqLeadOnly = key === 'NASDAQ' && h === 1 && sel.keys.includes('krLead');
+        const useFeats = isNasdaqLeadOnly ? [] : current.feats;
+        const useMeta = isNasdaqLeadOnly ? [] : baseMeta;
         const training = sel.eligible.map(row => ({
           ...row,
-          x: row.x.concat(sel.keys.map(k => row.extra[k]))
+          x: (isNasdaqLeadOnly ? [] : row.x).concat(sel.keys.map(k => row.extra[k]))
         }));
-        const meta = baseMeta.concat(sel.keys.map(k => EXTRA_META[k]));
-        const sig = sel.keys.join('+');
+        const meta = useMeta.concat(sel.keys.map(k => EXTRA_META[k]));
+        const sig = (isNasdaqLeadOnly ? 'lead:' : 'full:') + sel.keys.join('+');
         const extModel = fitLogisticModel(
           training,
           meta.length,
           sig === prevExtSig ? prevExtModel : null,
-          useRecency
+          hp.useRecency,
+          hp.l2Floor
         );
         prevExtModel = extModel;
         prevExtSig = sig;
         g = predictWithModel(
           extModel,
-          current.feats.concat(sel.keys.map(k => extra[k])),
+          useFeats.concat(sel.keys.map(k => extra[k])),
           current.vol,
           key,
           meta,
           h
         );
-      } else if (useRecency) {
-        const recModel = fitLogisticModel(pool, baseMeta.length, null, true);
+      } else if (hp.useRecency || hp.l2Floor > 10) {
+        const recModel = fitLogisticModel(pool, baseMeta.length, null, hp.useRecency, hp.l2Floor);
         g = predictWithModel(recModel, current.feats, current.vol, key, baseMeta, h);
       }
 
@@ -436,6 +519,7 @@ function buildHistories(rows, key, data, horizon) {
         ...g,
         usDate: refUsDate,
         usSessions: current.usSessions,
+        krLeadDate: extra._krLeadDate,
         extra,
         active: sel.keys,
         candidates
@@ -461,47 +545,51 @@ function forecastSingleDay(rows, targetIdx, key, data, horizon) {
   const baseMeta = key === 'NASDAQ' ? FEATURE_META.US : FEATURE_META.KR;
   const candidates = getCandidateKeys(key, h);
   const maps = buildMacroMaps(data);
+  const hp = getModelHyperparams(key, h);
 
   const current = extractBaseFeatures(rows, targetIdx, key, data);
   if (!current) return null;
 
   const pool = [];
-  // Strict no-leakage cutoff: training sample's outcome (i + h) must be <= targetIdx
   for (let i = 5; i <= targetIdx - h; i++) {
     const f = extractBaseFeatures(rows, i, key, data);
     const y = forwardReturn(rows, i, h);
     if (!f || y === null) continue;
     const [date, , , , breadth, flow] = rows[i];
+    const nextUsDate = i + 1 < rows.length ? rows[i + 1][0] : null;
     const refUs = key === 'NASDAQ' ? date : f.usDate;
     pool.push({
       x: f.feats,
       vol: f.vol,
       y,
       up: Number(y > 0),
-      extra: makeExtraRecord(refUs, breadth, flow, maps, f)
+      extra: makeExtraRecord(refUs, breadth, flow, maps, f, key, nextUsDate)
     });
   }
   if (pool.length < MIN_BASE_SAMPLES) return null;
 
   const [curDate, , , , curBreadth, curFlow] = rows[targetIdx];
+  const nextUsDate = targetIdx + 1 < rows.length ? rows[targetIdx + 1][0] : null;
   const refUsDate = key === 'NASDAQ' ? curDate : current.usDate;
-  const extra = makeExtraRecord(refUsDate, curBreadth, curFlow, maps, current);
+  const extra = makeExtraRecord(refUsDate, curBreadth, curFlow, maps, current, key, nextUsDate);
 
-  const useRecency = h === 5 || key === 'KOSPI';
-  const baseModel = fitLogisticModel(pool, baseMeta.length, null, useRecency);
+  const baseModel = fitLogisticModel(pool, baseMeta.length, null, hp.useRecency, hp.l2Floor);
   let g = predictWithModel(baseModel, current.feats, current.vol, key, baseMeta, h);
 
   const sel = selectActiveExtras(candidates, extra, pool);
   if (sel.keys.length) {
+    const isNasdaqLeadOnly = key === 'NASDAQ' && h === 1 && sel.keys.includes('krLead');
+    const useFeats = isNasdaqLeadOnly ? [] : current.feats;
+    const useMeta = isNasdaqLeadOnly ? [] : baseMeta;
     const training = sel.eligible.map(row => ({
       ...row,
-      x: row.x.concat(sel.keys.map(k => row.extra[k]))
+      x: (isNasdaqLeadOnly ? [] : row.x).concat(sel.keys.map(k => row.extra[k]))
     }));
-    const meta = baseMeta.concat(sel.keys.map(k => EXTRA_META[k]));
-    const extModel = fitLogisticModel(training, meta.length, null, useRecency);
+    const meta = useMeta.concat(sel.keys.map(k => EXTRA_META[k]));
+    const extModel = fitLogisticModel(training, meta.length, null, hp.useRecency, hp.l2Floor);
     g = predictWithModel(
       extModel,
-      current.feats.concat(sel.keys.map(k => extra[k])),
+      useFeats.concat(sel.keys.map(k => extra[k])),
       current.vol,
       key,
       meta,
@@ -513,6 +601,7 @@ function forecastSingleDay(rows, targetIdx, key, data, horizon) {
     ...g,
     usDate: refUsDate,
     usSessions: current.usSessions,
+    krLeadDate: extra._krLeadDate,
     extra,
     active: sel.keys,
     candidates
