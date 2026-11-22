@@ -1,4 +1,4 @@
-// 지수 관측소 v5.6 — 듀얼 호라이즌(1일·5일) + 고확신 신호 필터 + 선물·원자재·뉴스 모바일 앱
+// 지수 관측소 v5.7 — 듀얼 호라이즌(1일·5일) + 고확신 신호 필터 + 선물·원자재·뉴스 모바일 앱
 
 const MARKET_NAMES = {
   KOSPI: '코스피',
@@ -391,6 +391,8 @@ function renderForecast() {
             const newsLive = state.marketsData.NEWS || {};
             if (k === 'krFut' && Number.isFinite(futLive.K200_pct)) { val = futLive.K200_pct; isLiveOverlayVal = true; }
             else if (k === 'krBasis' && Number.isFinite(futLive.K200_basis)) { val = futLive.K200_basis; isLiveOverlayVal = true; }
+            else if (k === 'oil' && Number.isFinite(futLive.CL_pct)) { val = futLive.CL_pct; isLiveOverlayVal = true; }
+            else if (k === 'gold' && Number.isFinite(futLive.GC_pct)) { val = futLive.GC_pct; isLiveOverlayVal = true; }
             else if (k === 'news' && Array.isArray(newsLive.items) && newsLive.items.length && Number.isFinite(newsLive.sentiment)) { val = newsLive.sentiment; isLiveOverlayVal = true; }
           }
           const hasVal = Number.isFinite(val);
@@ -473,7 +475,7 @@ function renderForecast() {
     MARKET_NAMES[state.key] +
     ' ' +
     horizonLabel +
-    ' (v5.6)</span>' +
+    ' (v5.7)</span>' +
     '<div class="flex items-center gap-1.5">' +
     (state.isLiveIntraday ? '<span class="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/25 text-amber-200 border border-amber-400/40 font-semibold">장중 실시간 잠정</span>' : '') +
     '<span class="text-[11px] px-2 py-0.5 rounded-full ' +
@@ -630,6 +632,42 @@ function renderForecast() {
 }
 
 
+
+function buildLeftToRightAnimation(pointCount, totalMs) {
+  const n = Math.max(1, pointCount);
+  const delayPerPoint = (totalMs || 550) / n;
+  const previousY = ctx => {
+    if (ctx.index === 0) return ctx.chart.scales.y.getPixelForValue(ctx.parsed.y);
+    const meta = ctx.chart.getDatasetMeta(ctx.datasetIndex);
+    const prev = meta.data[ctx.index - 1];
+    return prev ? prev.getProps(['y'], true).y : ctx.chart.scales.y.getPixelForValue(ctx.parsed.y);
+  };
+  return {
+    x: {
+      type: 'number',
+      easing: 'linear',
+      duration: delayPerPoint,
+      from: NaN,
+      delay(ctx) {
+        if (ctx.type !== 'data' || ctx.xStarted) return 0;
+        ctx.xStarted = true;
+        return ctx.index * delayPerPoint;
+      }
+    },
+    y: {
+      type: 'number',
+      easing: 'linear',
+      duration: delayPerPoint,
+      from: previousY,
+      delay(ctx) {
+        if (ctx.type !== 'data' || ctx.yStarted) return 0;
+        ctx.yStarted = true;
+        return ctx.index * delayPerPoint;
+      }
+    }
+  };
+}
+
 async function renderFuturesChart() {
   const key = state.selectedFutChart;
   const tf = state.futChartTf || '15m';
@@ -718,6 +756,8 @@ async function renderFuturesChart() {
     options: {
       responsive: true,
       maintainAspectRatio: false,
+      animation: false,
+      animations: buildLeftToRightAnimation(points.length, 550),
       interaction: { mode: 'index', intersect: false },
       plugins: {
         legend: { display: false },
@@ -815,6 +855,8 @@ function renderPriceChart() {
     options: {
       responsive: true,
       maintainAspectRatio: false,
+      animation: false,
+      animations: buildLeftToRightAnimation(labels.length, 550),
       plugins: {
         legend: {
           display: true,
@@ -1102,7 +1144,7 @@ function renderBacktest() {
     '</tr></thead>' +
     '<tbody class="divide-y divide-slate-100 tabular-nums">' +
     '<tr class="bg-teal-50/50 font-semibold text-slate-900">' +
-    '<td class="py-2.5 pr-2">개선 v5.6 (시장별 전용 엔진)</td>' +
+    '<td class="py-2.5 pr-2">개선 v5.7 (시장별 전용 엔진)</td>' +
     '<td class="py-2.5 px-2 text-right text-teal-800">' +
     fmtB(brierV4) +
     '</td>' +
@@ -1201,7 +1243,7 @@ function handleFileImport(event) {
         validateImport(parsed);
         state.marketsData = { ...state.marketsData, ...parsed };
         recomputeMarket(state.key, false);
-        showToast('데이터를 반영해 v5.6 전체 모델을 재계산했습니다.');
+        showToast('데이터를 반영해 v5.7 전체 모델을 재계산했습니다.');
       } else {
         const lines = text
           .split(/\r?\n/)
