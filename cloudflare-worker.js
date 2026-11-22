@@ -181,6 +181,96 @@ async function fetchYahooQuoteWithSeries(symbol) {
   }
 }
 
+
+function isCmeWeekendKst(nowMs) {
+  const kst = new Date(nowMs + 9 * 3600 * 1000);
+  const dow = kst.getUTCDay(); // 0=일, 1=월, 6=토
+  const hh = kst.getUTCHours();
+  // CME Globex 휴장: 토 06:00 KST ~ 월 08:00 KST
+  return (dow === 6 && hh >= 6) || dow === 0 || (dow === 1 && hh < 8);
+}
+
+async function fetchBinancePerpQuote(candidates) {
+  for (const item of candidates) {
+    const sym = typeof item === 'string' ? item : item.sym;
+    const isSectorProxy = typeof item === 'object' ? Boolean(item.isSectorProxy) : false;
+    const proxyLabel = typeof item === 'object' ? (item.proxyLabel || sym) : sym;
+    try {
+      const [tRes, fRes] = await Promise.all([
+        fetch(`https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=${encodeURIComponent(sym)}`, { headers: { 'User-Agent': 'Mozilla/5.0' } }),
+        fetch(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${encodeURIComponent(sym)}`, { headers: { 'User-Agent': 'Mozilla/5.0' } })
+      ]);
+      if (!tRes.ok) continue;
+      const t = await tRes.json();
+      const price = Number(t.lastPrice);
+      const pct = Number(t.priceChangePercent);
+      if (!Number.isFinite(price) || price <= 0) continue;
+      let funding = null;
+      if (fRes.ok) {
+        const f = await fRes.json();
+        const r = Number(f.lastFundingRate);
+        if (Number.isFinite(r)) funding = Number((r * 100).toFixed(4));
+      }
+      return {
+        symbol: sym,
+        price: Number(price.toFixed(2)),
+        pct: Number.isFinite(pct) ? Number(pct.toFixed(2)) : 0,
+        funding,
+        isSectorProxy,
+        proxyLabel
+      };
+    } catch (_) {
+      continue;
+    }
+  }
+  return null;
+}
+
+async function fetchBinanceKlines(symbol, tf, limit) {
+  const binInt = tf === '15m' ? '15m' : tf === '1h' ? '1h' : '1d';
+  try {
+    const res = await fetch(`https://fapi.binance.com/fapi/v1/klines?symbol=${encodeURIComponent(symbol)}&interval=${binInt}&limit=${limit}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
+    if (!res.ok) return [];
+    const rows = await res.json();
+    if (!Array.isArray(rows) || rows.length < 5) return [];
+    return rows.map(r => {
+      const kst = new Date(Number(r[0]) + 9 * 3600 * 1000);
+      const lbl = tf === '1d'
+        ? kst.toISOString().slice(5, 10)
+        : `${kst.toISOString().slice(5, 10)} ${kst.toISOString().slice(11, 16)}`;
+      return [lbl, Number(Number(r[4]).toFixed(2)), Number(Number(r[2]).toFixed(2)), Number(Number(r[3]).toFixed(2))];
+    });
+  } catch (_) {
+    return [];
+  }
+}
+
+function getStockBinanceCandidates(symbol, sectorKey) {
+  const map = {
+    '000660.KS': ['SKHYNIXUSDT', 'SKHYUSDT', { sym: 'SOXXUSDT', isSectorProxy: true, proxyLabel: '반도체 ETF 무기한(SOXXUSDT)' }],
+    '005930.KS': ['SAMSUNGUSDT', { sym: 'SOXXUSDT', isSectorProxy: true, proxyLabel: '반도체 ETF 무기한(SOXXUSDT)' }],
+    'NVDA': ['NVDAUSDT'],
+    'TSLA': ['TSLAUSDT'],
+    'META': ['METAUSDT'],
+    'GOOGL': ['GOOGLUSDT'],
+    'AAPL': ['AAPLUSDT'],
+    'MSFT': ['MSFTUSDT'],
+    'AMZN': ['AMZNUSDT'],
+    'MU': ['MUUSDT', { sym: 'SOXXUSDT', isSectorProxy: true, proxyLabel: '반도체 ETF 무기한(SOXXUSDT)' }],
+    'PLTR': ['PLTRUSDT']
+  };
+  if (map[symbol]) return map[symbol];
+  if (sectorKey === 'semi' || sectorKey === 'us_semi') {
+    return [{ sym: 'SOXXUSDT', isSectorProxy: true, proxyLabel: '반도체 ETF 무기한(SOXXUSDT)' }, { sym: 'NVDAUSDT', isSectorProxy: true, proxyLabel: '엔비디아 무기한(NVDAUSDT)' }];
+  }
+  if (sectorKey === 'battery' || sectorKey === 'us_ev') {
+    return [{ sym: 'TSLAUSDT', isSectorProxy: true, proxyLabel: '테슬라 무기한(TSLAUSDT)' }];
+  }
+  return [];
+}
+
 async function fetchBtcPerp() {
   const ySeries = await fetchYahooQuoteWithSeries('BTC-USD');
   const series = ySeries ? ySeries.series : [];
@@ -383,6 +473,11 @@ async function fetchDetailedChart(key, tf) {
       }
     } catch (_) {}
   }
+  if ((key === 'CL' || key === 'GC') && isCmeWeekendKst(Date.now())) {
+    const bSym = key === 'CL' ? 'CLUSDT' : 'XAUUSDT';
+    const bPts = await fetchBinanceKlines(bSym, tf, cfg.limit);
+    if (bPts.length >= 5) return bPts;
+  }
 
   const symListMap = { NQ: ['NQ=F'], ES: ['ES=F'], CL: ['CL=F'], GC: ['GC=F'], BTC: ['BTC-USD'], K200: ['^KS200', '^KS11'] };
   const syms = symListMap[key] || [];
@@ -547,7 +642,7 @@ const KR_STOCK_DICT = {
 
 async function fetchYahooDaily2Y(symbol) {
   const cache = caches.default;
-  const cKey = new Request(`https://kis-y5y-cache.internal/v710/${encodeURIComponent(symbol)}`);
+  const cKey = new Request(`https://kis-y5y-cache.internal/v720/${encodeURIComponent(symbol)}`);
   const hit = await cache.match(cKey);
   if (hit) {
     try { return await hit.json(); } catch (_) {}
@@ -671,7 +766,7 @@ async function handleStockRequest(url, env, headers) {
   const sectorKey = SECTOR_PROFILES[reqSector] ? reqSector : (SECTOR_PROFILES[target.sector] ? target.sector : 'general');
   const profile = SECTOR_PROFILES[sectorKey];
   const cache = caches.default;
-  const cKey = new Request(`https://kis-stock-cache.internal/v710/${encodeURIComponent(target.sym)}/${sectorKey}`);
+  const cKey = new Request(`https://kis-stock-cache.internal/v720/${encodeURIComponent(target.sym)}/${sectorKey}`);
   const hit = await cache.match(cKey);
   if (hit) return new Response(await hit.text(), { status: 200, headers });
 
@@ -713,10 +808,14 @@ async function handleStockRequest(url, env, headers) {
     fetchRssPool('파이낸셜뉴스', 'https://www.fnnews.com/rss/r20/fn_realnews_stock.xml')
   ]);
 
-  const [peerResults, kisLive, newsPools] = await Promise.all([
+  const perpCands = getStockBinanceCandidates(mainData.symbol, sectorKey);
+  const perpPromise = perpCands.length ? fetchBinancePerpQuote(perpCands) : Promise.resolve(null);
+
+  const [peerResults, kisLive, newsPools, perpLive] = await Promise.all([
     Promise.all(peerPromises),
     kisPromise,
-    newsPromises
+    newsPromises,
+    perpPromise
   ]);
 
   const rows = mainData.rows.slice();
@@ -774,6 +873,7 @@ async function handleStockRequest(url, env, headers) {
     sectorLabel: profile.label,
     rows,
     peers: peerResults.filter(Boolean),
+    perp: perpLive,
     news
   });
 
@@ -796,7 +896,7 @@ export default {
       const key = (url.searchParams.get('key') || '').toUpperCase();
       const tf = url.searchParams.get('tf') || '15m';
       const cache = caches.default;
-      const cKey = new Request(`https://kis-chart-cache.internal/v593/${key}/${tf}`);
+      const cKey = new Request(`https://kis-chart-cache.internal/v720/${key}/${tf}`);
       const hit = await cache.match(cKey);
       if (hit) return new Response(await hit.text(), { status: 200, headers });
       const points = await fetchDetailedChart(key, tf);
@@ -809,7 +909,7 @@ export default {
     }
 
     const cache = caches.default;
-    const respCacheKey = new Request('https://kis-live-cache.internal/v593/live');
+    const respCacheKey = new Request('https://kis-live-cache.internal/v720/live');
     const cachedResp = await cache.match(respCacheKey);
     if (cachedResp) {
       const body = await cachedResp.text();
@@ -841,7 +941,8 @@ export default {
       }
     })();
 
-    const [_, nq, es, cl, gc, krw, btc, news] = await Promise.all([
+    const weekendMode = isCmeWeekendKst(kst.nowMs);
+    const [_, nq, es, cl, gc, krw, btc, news, clWk, gcWk] = await Promise.all([
       kisPromise,
       fetchYahooQuoteWithSeries('NQ=F'),
       fetchYahooQuoteWithSeries('ES=F'),
@@ -849,13 +950,29 @@ export default {
       fetchYahooQuoteWithSeries('GC=F'),
       fetchYahooQuoteWithSeries('KRW=X'),
       fetchBtcPerp(),
-      fetchLiveNews(kst)
+      fetchLiveNews(kst),
+      weekendMode ? fetchBinancePerpQuote(['CLUSDT']) : Promise.resolve(null),
+      weekendMode ? fetchBinancePerpQuote(['XAUUSDT']) : Promise.resolve(null)
     ]);
 
     if (nq) { futures.NQ = nq.price; futures.NQ_pct = nq.pct; futures.series.NQ = nq.series; }
     if (es) { futures.ES = es.price; futures.ES_pct = es.pct; futures.series.ES = es.series; }
     if (cl) { futures.CL = cl.price; futures.CL_pct = cl.pct; futures.series.CL = cl.series; }
     if (gc) { futures.GC = gc.price; futures.GC_pct = gc.pct; futures.series.GC = gc.series; }
+    if (weekendMode && clWk) {
+      futures.CL = clWk.price;
+      futures.CL_pct = clWk.pct;
+      futures.CL_weekend = true;
+      futures.CL_funding = clWk.funding;
+      futures.CL_src = 'Binance CLUSDT';
+    }
+    if (weekendMode && gcWk) {
+      futures.GC = gcWk.price;
+      futures.GC_pct = gcWk.pct;
+      futures.GC_weekend = true;
+      futures.GC_funding = gcWk.funding;
+      futures.GC_src = 'Binance XAUUSDT';
+    }
     if (btc) {
       futures.BTC = btc.BTC;
       futures.BTC_pct = btc.BTC_pct;

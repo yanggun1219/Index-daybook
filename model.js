@@ -986,6 +986,7 @@ function analyzeIndividualStock(payload) {
     reliability,
     contributions,
     recentRows: rows.slice(-30),
+    perp: payload.perp || null,
     news: Array.isArray(payload.news) ? payload.news : [],
     backtest: {
       n: evalN,
@@ -997,5 +998,51 @@ function analyzeIndividualStock(payload) {
       hiAcc: hiN >= 15 ? hiHit / hiN : null,
       hiBrier: hiN >= 15 ? hiBrierSum / hiN : null
     }
+  };
+}
+
+function applyStockPerpOverlay(analysis, usePerp) {
+  if (!analysis || analysis.error) return analysis;
+  const baseP = analysis.p;
+  const perp = analysis.perp;
+  if (!usePerp || !perp || !Number.isFinite(perp.pct)) {
+    return { ...analysis, perpApplied: false, perpImpactPct: 0 };
+  }
+  const weight = perp.isSectorProxy ? 0.45 : 0.75;
+  const cap = perp.isSectorProxy ? 4.0 : 6.0;
+  let impact = Math.max(-cap, Math.min(cap, perp.pct * weight));
+  // 과열 펀딩비 역방향 완충 (|펀딩비| > 0.05%)
+  if (Number.isFinite(perp.funding) && Math.abs(perp.funding) > 0.05) {
+    impact += perp.funding > 0 ? -0.45 : 0.45;
+  }
+  const adjP = Math.max(0.05, Math.min(0.95, baseP + impact / 100));
+  let signal = { label: '중립 · 관망 구간', tone: 'slate' };
+  if (adjP >= 0.62) signal = { label: '고확신 상승 우위', tone: 'teal' };
+  else if (adjP <= 0.38) signal = { label: '고확신 하락 경계', tone: 'rose' };
+  return {
+    ...analysis,
+    p: adjP,
+    down: 1 - adjP,
+    score: Math.round(adjP * 100),
+    signal,
+    perpApplied: true,
+    perpImpactPct: Number(((adjP - baseP) * 100).toFixed(2))
+  };
+}
+
+function applyWeekendOilOverlay(forecast, clPct, isWeekend, enabled) {
+  if (!forecast || !enabled || !isWeekend || !Number.isFinite(clPct) || Math.abs(clPct) < 1.0) {
+    return forecast ? { ...forecast, weekendOilApplied: false, weekendOilImpactPct: 0 } : forecast;
+  }
+  // 주말 유가 급등은 증시 부담(-), 급락은 안도(+)로 완만하게 반영 (최대 ±3.5%p)
+  const impact = Math.max(-3.5, Math.min(3.5, -clPct * 0.45));
+  const adjP = Math.max(0.05, Math.min(0.95, forecast.p + impact / 100));
+  return {
+    ...forecast,
+    p: adjP,
+    down: 1 - adjP,
+    score: Math.round(adjP * 100),
+    weekendOilApplied: true,
+    weekendOilImpactPct: Number(((adjP - forecast.p) * 100).toFixed(2))
   };
 }

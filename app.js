@@ -1,4 +1,4 @@
-// 지수 관측소 v7.1 — 다크모드 금융 터미널 리뉴얼 + 보드/카운트업/차트 드로우 애니메이션
+// 지수 관측소 v7.2 — 다크모드 금융 터미널 리뉴얼 + 보드/카운트업/차트 드로우 애니메이션
 
 const MARKET_NAMES = {
   KOSPI: '코스피',
@@ -55,7 +55,8 @@ const state = {
   stockError: '',
   stockResult: null,
   stockCache: {},
-  stockChartInstance: null
+  stockChartInstance: null,
+  useStockPerpOverlay: true
 };
 
 const fmtPct = x => (x === null || x === undefined || Number.isNaN(x) ? '-' : (100 * x).toFixed(1) + '%');
@@ -254,6 +255,9 @@ function recomputeMarket(id, keepDate, animate) {
     adjF = isLatest
       ? applyKrFuturesOverlay(adjF, liveKrFut, liveKrBasis, id, state.useKrFutOverlay)
       : applyKrFuturesOverlay(adjF, 0, 0, id, false);
+    adjF = isLatest && typeof applyWeekendOilOverlay === 'function'
+      ? applyWeekendOilOverlay(adjF, futObj.CL_pct, Boolean(futObj.CL_weekend), state.useKrFutOverlay)
+      : adjF;
     state.currentForecast = adjF;
     state.simValues = state.currentForecast ? [...state.currentForecast.rawFeats] : [];
     state.simNews = isLatest ? liveNewsScore : 0;
@@ -347,8 +351,8 @@ function renderFuturesCard(f) {
           { key: 'K200', label: '코스피200 선물', val: fut.K200_pct, price: fut.K200, basis: fut.K200_basis },
           { key: 'NQ', label: '나스닥100 선물', val: fut.NQ_pct, price: fut.NQ },
           { key: 'ES', label: 'S&P500 선물', val: fut.ES_pct, price: fut.ES },
-          { key: 'CL', label: 'WTI 유가', val: fut.CL_pct, price: fut.CL },
-          { key: 'GC', label: '국제 금', val: fut.GC_pct, price: fut.GC },
+          { key: 'CL', label: 'WTI 유가', val: fut.CL_pct, price: fut.CL, weekend: Boolean(fut.CL_weekend) },
+          { key: 'GC', label: '국제 금', val: fut.GC_pct, price: fut.GC, weekend: Boolean(fut.GC_weekend) },
           { key: 'BTC', label: 'BTC 무기한 선물', val: fut.BTC_pct, price: fut.BTC, funding: fut.BTC_funding }
         ].filter(x => Number.isFinite(x.val))
       : [];
@@ -394,6 +398,7 @@ function renderFuturesCard(f) {
                 (it.basis >= 0 ? 'text-red-600 dark:text-rose-400' : 'text-blue-600 dark:text-sky-400') +
                 '">B ' + (it.basis >= 0 ? '+' : '') + it.basis.toFixed(1) + '</span>'
               : '') +
+            (it.weekend ? '<span class="text-[9px] font-bold shrink-0 px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-600 dark:text-amber-300">위켄드 24H</span>' : '') +
             (Number.isFinite(it.funding)
               ? '<span class="text-[10px] font-semibold shrink-0 text-indigo-600 dark:text-indigo-300">F ' +
                 (it.funding >= 0 ? '+' : '') + it.funding.toFixed(3) + '%</span>'
@@ -417,7 +422,7 @@ function renderFuturesCard(f) {
         })
         .join('') +
       '</div>' +
-      '<div class="mt-2 text-[11px] text-slate-400 dark:text-slate-500">각 타일을 누르면 15분봉·1시간봉·일봉 상세 차트가 열립니다. (B=베이시스, F=펀딩비)</div>' +
+      '<div class="mt-2 text-[11px] text-slate-400 dark:text-slate-500">각 타일을 누르면 15분봉·1시간봉·일봉 상세 차트가 열립니다. (B=베이시스, F=펀딩비' + (f && f.weekendOilApplied ? ' · 위켄드 유가 보정 ' + (f.weekendOilImpactPct >= 0 ? '+' : '') + f.weekendOilImpactPct.toFixed(2) + '%p 반영 중' : '') + ')</div>' +
       (state.selectedFutChart
         ? '<div class="mt-3 pt-3 border-t border-slate-100 dark:border-slate-800">' +
           '<div class="flex items-center justify-between gap-2 mb-2 flex-wrap">' +
@@ -1292,7 +1297,7 @@ function renderBacktest() {
     '</tr></thead>' +
     '<tbody class="divide-y divide-slate-100 dark:divide-slate-800/90 tabular-nums">' +
     '<tr class="bg-teal-50/60 dark:bg-teal-500/10 font-semibold text-slate-900 dark:text-slate-100">' +
-    '<td class="py-2.5 pr-2">개선 v7.1 (시장별 전용 엔진)</td>' +
+    '<td class="py-2.5 pr-2">개선 v7.2 (시장별 전용 엔진)</td>' +
     '<td class="py-2.5 px-2 text-right text-teal-800 dark:text-teal-300">' + fmtB(brierV4) + '</td>' +
     '<td class="py-2.5 pl-2 text-right text-teal-800 dark:text-teal-300">' + fmtPct(covV4) + '</td>' +
     '</tr>' +
@@ -1375,7 +1380,7 @@ function handleFileImport(event) {
         validateImport(parsed);
         state.marketsData = { ...state.marketsData, ...parsed };
         recomputeMarket(state.key, false, true);
-        showToast('데이터를 반영해 v7.1 전체 모델을 재계산했습니다.');
+        showToast('데이터를 반영해 v7.2 전체 모델을 재계산했습니다.');
       } else {
         const lines = text
           .split(/\r?\n/)
@@ -1608,7 +1613,7 @@ function renderStockTab() {
     bodyHtml =
       '<section class="mt-3 rounded-2xl surface-card p-5 text-center">' +
       '<div class="text-sm font-bold text-slate-900 dark:text-slate-100">실시간 중계 서버(Cloudflare Workers) 연결 필요</div>' +
-      '<p class="mt-1.5 text-xs text-slate-500 dark:text-slate-400 leading-relaxed">개별 종목 2년 일봉·업종별 선행지표·종목 속보 뉴스를 실시간으로 수집하기 위해 Cloudflare Workers URL이 필요합니다. v7.1 Worker를 배포한 뒤 아래 버튼으로 주소를 저장해 주세요.</p>' +
+      '<p class="mt-1.5 text-xs text-slate-500 dark:text-slate-400 leading-relaxed">개별 종목 2년 일봉·업종별 선행지표·종목 속보 뉴스를 실시간으로 수집하기 위해 Cloudflare Workers URL이 필요합니다. v7.2 Worker를 배포한 뒤 아래 버튼으로 주소를 저장해 주세요.</p>' +
       '<button id="stock-goto-worker" type="button" class="mt-3 px-4 py-2 rounded-xl bg-teal-600 hover:bg-teal-500 text-white text-xs font-bold transition">Workers 주소 설정하러 가기</button>' +
       '</section>';
   } else if (state.stockLoading) {
@@ -1623,10 +1628,10 @@ function renderStockTab() {
       '<section class="mt-3 rounded-2xl surface-card p-5 text-center">' +
       '<div class="text-sm font-bold text-rose-600 dark:text-rose-400">종목 조회 오류</div>' +
       '<p class="mt-1.5 text-xs text-slate-600 dark:text-slate-400">' + escapeHtml(state.stockError) + '</p>' +
-      '<p class="mt-1 text-[11px] text-slate-400 dark:text-slate-500">Cloudflare Worker가 v7.1(`/stock` 지원)으로 배포되었는지 확인해 주세요.</p>' +
+      '<p class="mt-1 text-[11px] text-slate-400 dark:text-slate-500">Cloudflare Worker가 v7.2(`/stock` 지원)으로 배포되었는지 확인해 주세요.</p>' +
       '</section>';
   } else if (state.stockResult) {
-    const s = state.stockResult;
+    const s = typeof applyStockPerpOverlay === 'function' ? applyStockPerpOverlay(state.stockResult, state.useStockPerpOverlay) : state.stockResult;
     const isBull = s.p >= 0.5;
     const heroGlow =
       s.signal.tone === 'teal'
@@ -1696,6 +1701,46 @@ function renderStockTab() {
           .join('') +
         '</ul>'
       : '<p class="text-xs text-slate-500 dark:text-slate-400">최근 7일 관련 뉴스가 없습니다.</p>';
+
+
+    const perpCardHtml = s.perp
+      ? '<section class="rounded-2xl surface-card p-4 shadow-sm' + boardCls(2) + '">' +
+        '<div class="flex items-center justify-between gap-2 mb-2 flex-wrap">' +
+        '<div class="flex items-center gap-2">' +
+        '<h2 class="text-sm font-bold text-slate-900 dark:text-slate-100">바이낸스 24H 무기한 선물</h2>' +
+        '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30">' +
+        escapeHtml(s.perp.isSectorProxy ? s.perp.proxyLabel : s.perp.symbol) +
+        '</span>' +
+        '</div>' +
+        '<button id="toggle-stock-perp" type="button" class="px-2.5 py-1 rounded-lg text-[11px] font-bold transition ' +
+        (state.useStockPerpOverlay
+          ? 'bg-teal-600 text-white shadow-sm'
+          : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400') +
+        '">무기한 보정 ' + (state.useStockPerpOverlay ? 'ON' : 'OFF') + '</button>' +
+        '</div>' +
+        '<div class="grid grid-cols-3 gap-2 text-xs tabular-nums">' +
+        '<div class="rounded-xl surface-inset p-2.5">' +
+        '<div class="text-[10px] text-slate-500 dark:text-slate-400">현재가 (USDT)</div>' +
+        '<div class="text-sm font-extrabold text-slate-900 dark:text-white mt-0.5">' + s.perp.price.toLocaleString('en-US') + '</div>' +
+        '</div>' +
+        '<div class="rounded-xl surface-inset p-2.5">' +
+        '<div class="text-[10px] text-slate-500 dark:text-slate-400">24시간 등락</div>' +
+        '<div class="text-sm font-extrabold mt-0.5 ' + (s.perp.pct >= 0 ? 'text-red-600 dark:text-rose-400' : 'text-blue-600 dark:text-sky-400') + '">' + fmtMove(s.perp.pct) + '</div>' +
+        '</div>' +
+        '<div class="rounded-xl surface-inset p-2.5">' +
+        '<div class="text-[10px] text-slate-500 dark:text-slate-400">펀딩비 · 보정</div>' +
+        '<div class="text-sm font-extrabold text-indigo-600 dark:text-indigo-300 mt-0.5">' +
+        (Number.isFinite(s.perp.funding) ? (s.perp.funding >= 0 ? '+' : '') + s.perp.funding.toFixed(3) + '%' : '-') +
+        '</div>' +
+        '</div>' +
+        '</div>' +
+        '<div class="mt-2 text-[11px] text-slate-500 dark:text-slate-400">' +
+        (s.perpApplied
+          ? '야간·주말 무기한 선물 모멘텀을 확률에 <strong class="text-teal-700 dark:text-teal-300">' + (s.perpImpactPct >= 0 ? '+' : '') + s.perpImpactPct.toFixed(2) + '%p</strong> 실시간 보정 중 (5년 기본 백테스트와 분리 적용)'
+          : '무기한 선물 보정이 꺼져 있습니다 (순수 5년 업종 회귀 확률).') +
+        '</div>' +
+        '</section>'
+      : '';
 
     bodyHtml =
       '<div class="mt-3 lg:grid lg:grid-cols-12 lg:gap-4 lg:items-start">' +
@@ -1771,6 +1816,7 @@ function renderStockTab() {
       '</div>' +
       // Right Column
       '<div class="lg:col-span-6 space-y-3 mt-3 lg:mt-0">' +
+      perpCardHtml +
       '<section class="rounded-2xl surface-card p-4 shadow-sm' + boardCls(2) + '">' +
       '<div class="flex items-center justify-between mb-1.5">' +
       '<h2 class="text-sm font-bold text-slate-900 dark:text-slate-100">' + escapeHtml(s.sectorLabel) + ' 추종 지표 기여도</h2>' +
@@ -1863,6 +1909,15 @@ function renderStockTab() {
       switchTab('backtest');
       const inp = document.getElementById('worker-url-input');
       if (inp) inp.focus();
+    });
+  }
+  const perpToggleBtn = document.getElementById('toggle-stock-perp');
+  if (perpToggleBtn) {
+    perpToggleBtn.addEventListener('click', () => {
+      state.useStockPerpOverlay = !state.useStockPerpOverlay;
+      state.animateBoard = false;
+      renderStockTab();
+      showToast(state.useStockPerpOverlay ? '바이낸스 무기한 선물 실시간 보정을 켰습니다.' : '무기한 선물 보정을 껐습니다.');
     });
   }
   if (state.stockResult) renderStockChart();
@@ -1984,6 +2039,9 @@ function initApp() {
     adjF = isLatest
       ? applyKrFuturesOverlay(adjF, liveKrFut, liveKrBasis, state.key, state.useKrFutOverlay)
       : applyKrFuturesOverlay(adjF, 0, 0, state.key, false);
+    adjF = isLatest && typeof applyWeekendOilOverlay === 'function'
+      ? applyWeekendOilOverlay(adjF, futObj.CL_pct, Boolean(futObj.CL_weekend), state.useKrFutOverlay)
+      : adjF;
     state.currentForecast = adjF;
     state.simValues = state.currentForecast ? [...state.currentForecast.rawFeats] : [];
     state.simNews = isLatest ? liveNewsScore : 0;
