@@ -1,4 +1,4 @@
-// 지수 관측소 v5.2 — 듀얼 호라이즌(1일·5일) + 고확신 신호 필터 + 선물·원자재·뉴스 모바일 앱
+// 지수 관측소 v5.3 — 듀얼 호라이즌(1일·5일) + 고확신 신호 필터 + 선물·원자재·뉴스 모바일 앱
 
 const MARKET_NAMES = {
   KOSPI: '코스피',
@@ -200,7 +200,7 @@ function renderFuturesAndNewsSection(f) {
             '<div class="rounded-xl bg-slate-50 border border-slate-100 px-3 py-2">' +
             '<div class="flex items-center justify-between text-[11px] text-slate-500">' +
             '<span>' + it.label + '</span>' +
-            (Number.isFinite(it.basis) ? '<span class="text-[10px] font-semibold text-teal-700">베이시스 ' + (it.basis >= 0 ? '+' : '') + it.basis.toFixed(2) + '</span>' : '') +
+            (Number.isFinite(it.basis) ? '<span class="text-[10px] font-semibold ' + (it.basis >= 0 ? 'text-red-600' : 'text-blue-600') + '">베이시스 ' + (it.basis >= 0 ? '+' : '') + it.basis.toFixed(2) + '</span>' : '') +
             (Number.isFinite(it.funding) ? '<span class="text-[10px] font-semibold text-indigo-700">펀딩 ' + (it.funding >= 0 ? '+' : '') + it.funding.toFixed(3) + '%</span>' : '') +
             '</div>' +
             '<div class="mt-0.5 flex items-baseline justify-between tabular-nums">' +
@@ -208,7 +208,7 @@ function renderFuturesAndNewsSection(f) {
             (Number.isFinite(it.price) ? it.price.toLocaleString('en-US') : '-') +
             '</span>' +
             '<span class="text-xs font-bold ' +
-            (pos ? 'text-teal-700' : 'text-rose-700') +
+            (pos ? 'text-red-600' : 'text-blue-600') +
             '">' +
             fmtMove(it.val) +
             '</span>' +
@@ -228,9 +228,9 @@ function renderFuturesAndNewsSection(f) {
   const score = hasNews && Number.isFinite(news.sentiment) ? news.sentiment : 0;
   const toneClass =
     score >= 15
-      ? 'bg-teal-50 text-teal-800'
+      ? 'bg-red-50 text-red-700'
       : score <= -15
-        ? 'bg-rose-50 text-rose-800'
+        ? 'bg-blue-50 text-blue-700'
         : 'bg-slate-100 text-slate-700';
   const toneLabel = !hasNews ? '수집 대기' : score >= 15 ? '우호적' : score <= -15 ? '경계·부정' : '중립';
   const impactNote =
@@ -321,9 +321,9 @@ function renderForecast() {
 
   const sigBadgeClass =
     f.signal.tone === 'teal'
-      ? 'bg-emerald-500/20 text-emerald-200 border border-emerald-400/40'
+      ? 'bg-red-500/25 text-red-200 border border-red-400/40'
       : f.signal.tone === 'rose'
-        ? 'bg-rose-500/25 text-rose-200 border border-rose-400/40'
+        ? 'bg-blue-500/25 text-sky-200 border border-sky-400/40'
         : 'bg-slate-800 text-slate-300 border border-slate-700';
 
   const regimeBadgeClass =
@@ -388,7 +388,7 @@ function renderForecast() {
         c.unit +
         ')</span></span>' +
         '<span class="font-semibold tabular-nums ' +
-        (pos ? 'text-teal-700' : 'text-rose-700') +
+        (pos ? 'text-red-600' : 'text-blue-600') +
         '">' +
         (pos ? '+' : '') +
         c.impactPct.toFixed(2) +
@@ -396,7 +396,7 @@ function renderForecast() {
         '</div>' +
         '<div class="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">' +
         '<div class="h-full rounded-full ' +
-        (pos ? 'bg-teal-600' : 'bg-rose-500') +
+        (pos ? 'bg-red-500' : 'bg-blue-500') +
         '" style="width:' +
         Math.max(4, barW).toFixed(1) +
         '%"></div>' +
@@ -410,7 +410,7 @@ function renderForecast() {
   const nextActual =
     fwdActual !== null
       ? '<span class="font-semibold ' +
-        (fwdActual >= 0 ? 'text-teal-700' : 'text-rose-700') +
+        (fwdActual >= 0 ? 'text-red-600' : 'text-blue-600') +
         '">' +
         fmtMove(fwdActual) +
         '</span> (' +
@@ -425,7 +425,7 @@ function renderForecast() {
     MARKET_NAMES[state.key] +
     ' ' +
     horizonLabel +
-    ' (v5.2)</span>' +
+    ' (v5.3)</span>' +
     '<div class="flex items-center gap-1.5">' +
     (state.isLiveIntraday ? '<span class="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/25 text-amber-200 border border-amber-400/40 font-semibold">장중 실시간 잠정</span>' : '') +
     '<span class="text-[11px] px-2 py-0.5 rounded-full ' +
@@ -439,7 +439,7 @@ function renderForecast() {
     '</div>' +
     '</div>' +
     '<div class="mt-2.5 flex items-center justify-between gap-3">' +
-    '<div class="text-4xl sm:text-5xl font-bold tracking-tight text-emerald-300 tabular-nums">' +
+    '<div class="text-4xl sm:text-5xl font-bold tracking-tight tabular-nums ' + (f.p >= 0.5 ? 'text-rose-400' : 'text-sky-400') + '">' +
     fmtPct(f.p) +
     '</div>' +
     '<div class="text-right">' +
@@ -454,7 +454,7 @@ function renderForecast() {
     '</div>' +
     '</div>' +
     '<div class="mt-3 h-2.5 w-full bg-slate-700 rounded-full overflow-hidden">' +
-    '<div class="h-full bg-emerald-400 rounded-full transition-all" style="width:' +
+    '<div class="h-full rounded-full transition-all ' + (f.p >= 0.5 ? 'bg-rose-400' : 'bg-sky-400') + '" style="width:' +
     (f.p * 100).toFixed(1) +
     '%"></div>' +
     '</div>' +
@@ -488,15 +488,15 @@ function renderForecast() {
     '</span>' +
     '</div>' +
     '<div class="mt-2.5 grid grid-cols-2 gap-2.5">' +
-    '<div class="rounded-xl bg-teal-50/70 px-3 py-2.5">' +
-    '<div class="text-xs text-teal-800">상승 시 중앙값</div>' +
-    '<div class="text-base font-bold text-teal-900 tabular-nums mt-0.5">' +
+    '<div class="rounded-xl bg-red-50/70 px-3 py-2.5">' +
+    '<div class="text-xs text-red-700">상승 시 중앙값</div>' +
+    '<div class="text-base font-bold text-red-800 tabular-nums mt-0.5">' +
     fmtMove(f.gain) +
     '</div>' +
     '</div>' +
-    '<div class="rounded-xl bg-rose-50/70 px-3 py-2.5">' +
-    '<div class="text-xs text-rose-800">하락 시 중앙값</div>' +
-    '<div class="text-base font-bold text-rose-900 tabular-nums mt-0.5">' +
+    '<div class="rounded-xl bg-blue-50/70 px-3 py-2.5">' +
+    '<div class="text-xs text-blue-700">하락 시 중앙값</div>' +
+    '<div class="text-base font-bold text-blue-800 tabular-nums mt-0.5">' +
     fmtMove(f.loss) +
     '</div>' +
     '</div>' +
@@ -598,7 +598,7 @@ function renderPriceChart() {
         {
           label: '예상 상단 (P90)',
           data: upperBand,
-          borderColor: '#0284c7',
+          borderColor: '#dc2626',
           borderDash: [4, 4],
           borderWidth: 1.5,
           pointRadius: 3,
@@ -607,7 +607,7 @@ function renderPriceChart() {
         {
           label: '예상 하단 (P10)',
           data: lowerBand,
-          borderColor: '#e11d48',
+          borderColor: '#2563eb',
           borderDash: [4, 4],
           borderWidth: 1.5,
           pointRadius: 3,
@@ -714,7 +714,7 @@ function renderSimulator() {
     (state.horizon === 5 ? '5거래일' : '1거래일') +
     ') 시뮬레이션</span>' +
     '<span id="sim-change" class="text-xs font-semibold tabular-nums ' +
-    (diffP >= 0 ? 'text-emerald-300' : 'text-rose-300') +
+    (diffP >= 0 ? 'text-rose-300' : 'text-sky-300') +
     '">기존 대비 ' +
     (diffP >= 0 ? '+' : '') +
     diffP.toFixed(1) +
@@ -775,7 +775,7 @@ function renderSimulator() {
     const dPct = (updated.p - f.p) * 100;
     const chEl = document.getElementById('sim-change');
     chEl.textContent = '기존 대비 ' + (dPct >= 0 ? '+' : '') + dPct.toFixed(1) + '%p';
-    chEl.className = 'text-xs font-semibold tabular-nums ' + (dPct >= 0 ? 'text-emerald-300' : 'text-rose-300');
+    chEl.className = 'text-xs font-semibold tabular-nums ' + (dPct >= 0 ? 'text-rose-300' : 'text-sky-300');
     document.getElementById('sim-band').textContent = fmtMove(updated.low) + ' ~ ' + fmtMove(updated.high);
   };
 
@@ -914,7 +914,7 @@ function renderBacktest() {
     '</tr></thead>' +
     '<tbody class="divide-y divide-slate-100 tabular-nums">' +
     '<tr class="bg-teal-50/50 font-semibold text-slate-900">' +
-    '<td class="py-2.5 pr-2">개선 v5.2 (시장별 전용 엔진)</td>' +
+    '<td class="py-2.5 pr-2">개선 v5.3 (시장별 전용 엔진)</td>' +
     '<td class="py-2.5 px-2 text-right text-teal-800">' +
     fmtB(brierV4) +
     '</td>' +
@@ -1013,7 +1013,7 @@ function handleFileImport(event) {
         validateImport(parsed);
         state.marketsData = { ...state.marketsData, ...parsed };
         recomputeMarket(state.key, false);
-        showToast('데이터를 반영해 v5.2 전체 모델을 재계산했습니다.');
+        showToast('데이터를 반영해 v5.3 전체 모델을 재계산했습니다.');
       } else {
         const lines = text
           .split(/\r?\n/)
