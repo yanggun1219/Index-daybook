@@ -1,4 +1,4 @@
-// 지수 관측소 v4.3 — 듀얼 호라이즌(1일·5일) + 고확신 신호 필터 + 선물·원자재·뉴스 모바일 앱
+// 지수 관측소 v5.0 — 듀얼 호라이즌(1일·5일) + 고확신 신호 필터 + 선물·원자재·뉴스 모바일 앱
 
 const MARKET_NAMES = {
   KOSPI: '코스피',
@@ -21,6 +21,9 @@ const state = {
   simKrFut: 0,
   useNewsOverlay: true,
   useKrFutOverlay: true,
+  isLiveIntraday: false,
+  liveUpdatedKst: '',
+  workerUrl: (typeof localStorage !== 'undefined' && localStorage.getItem('daybook_worker_url')) || '',
   chartInstance: null
 };
 
@@ -412,8 +415,9 @@ function renderForecast() {
     MARKET_NAMES[state.key] +
     ' ' +
     horizonLabel +
-    ' (v4.3)</span>' +
+    ' (v5.0)</span>' +
     '<div class="flex items-center gap-1.5">' +
+    (state.isLiveIntraday ? '<span class="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/25 text-amber-200 border border-amber-400/40 font-semibold">장중 실시간 잠정</span>' : '') +
     '<span class="text-[11px] px-2 py-0.5 rounded-full ' +
     regimeBadgeClass +
     '">' +
@@ -900,7 +904,7 @@ function renderBacktest() {
     '</tr></thead>' +
     '<tbody class="divide-y divide-slate-100 tabular-nums">' +
     '<tr class="bg-teal-50/50 font-semibold text-slate-900">' +
-    '<td class="py-2.5 pr-2">개선 v4.3 (시장별 전용 엔진)</td>' +
+    '<td class="py-2.5 pr-2">개선 v5.0 (시장별 전용 엔진)</td>' +
     '<td class="py-2.5 px-2 text-right text-teal-800">' +
     fmtB(brierV4) +
     '</td>' +
@@ -934,6 +938,16 @@ function renderBacktest() {
     '</tbody></table></div>' +
     '</section>' +
     '<section class="mt-3 rounded-2xl bg-white border border-slate-200 p-4 shadow-sm">' +
+    '<h2 class="text-sm font-bold text-slate-900 mb-1">실시간 조회 서버 연결 (Cloudflare Workers)</h2>' +
+    '<p class="text-xs text-slate-500 mb-2">Cloudflare Workers에 배포한 중계 URL을 저장하면 상단 <strong>실시간 조회</strong> 버튼으로 KIS 국내지수·코스피200 선물·나스닥 선물을 즉시 반영합니다.</p>' +
+    '<div class="flex gap-2">' +
+    '<input id="worker-url-input" type="url" placeholder="https://index-daybook-live.xxx.workers.dev" value="' +
+    escapeHtml(state.workerUrl) +
+    '" class="flex-1 text-xs border border-slate-300 rounded-xl px-3 py-2 text-slate-800" />' +
+    '<button id="worker-url-save" type="button" class="px-3.5 py-2 rounded-xl bg-teal-700 text-white text-xs font-semibold hover:bg-teal-800 transition whitespace-nowrap">저장</button>' +
+    '</div>' +
+    '</section>' +
+    '<section class="mt-3 rounded-2xl bg-white border border-slate-200 p-4 shadow-sm">' +
     '<h2 class="text-sm font-bold text-slate-900 mb-1.5">최신 데이터 불러오기 (data.js / JSON / CSV)</h2>' +
     '<div class="flex flex-wrap items-center gap-2 mt-2">' +
     '<label class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900 text-white text-xs font-semibold cursor-pointer hover:bg-slate-800 transition">' +
@@ -952,10 +966,24 @@ function renderBacktest() {
     '</section>';
 
   document.getElementById('file-import').addEventListener('change', handleFileImport);
+  const saveBtn = document.getElementById('worker-url-save');
+  if (saveBtn) {
+    saveBtn.addEventListener('click', () => {
+      const val = (document.getElementById('worker-url-input').value || '').trim().replace(/\/+$/, '');
+      if (val && !/^https:\/\//.test(val)) {
+        showToast('https:// 로 시작하는 Cloudflare Workers 주소를 입력해 주세요.', true);
+        return;
+      }
+      state.workerUrl = val;
+      try { localStorage.setItem('daybook_worker_url', val); } catch (_) {}
+      showToast(val ? '실시간 중계 서버 주소를 저장했습니다.' : '실시간 서버 주소를 비웠습니다.');
+    });
+  }
   document.getElementById('data-reset').addEventListener('click', () => {
     state.marketsData = JSON.parse(JSON.stringify(markets));
+    state.isLiveIntraday = false;
     recomputeMarket(state.key, false);
-    showToast('기본 수록 데이터로 복원했습니다.');
+    showToast('기본 수록 데이터(종가)로 복원했습니다.');
   });
 }
 
@@ -975,7 +1003,7 @@ function handleFileImport(event) {
         validateImport(parsed);
         state.marketsData = { ...state.marketsData, ...parsed };
         recomputeMarket(state.key, false);
-        showToast('데이터를 반영해 v4.3 전체 모델을 재계산했습니다.');
+        showToast('데이터를 반영해 v5.0 전체 모델을 재계산했습니다.');
       } else {
         const lines = text
           .split(/\r?\n/)
@@ -1005,6 +1033,62 @@ function renderAll() {
   renderForecast();
   renderSimulator();
   if (state.tab === 'backtest') renderBacktest();
+}
+
+
+async function fetchLiveSnapshot() {
+  const btn = document.getElementById('live-fetch-btn');
+  let baseUrl = (state.workerUrl || '').trim().replace(/\/+$/, '');
+  if (!baseUrl) {
+    switchTab('backtest');
+    const inp = document.getElementById('worker-url-input');
+    if (inp) inp.focus();
+    showToast('먼저 아래에 Cloudflare Workers 주소를 입력하고 저장해 주세요.');
+    return;
+  }
+
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '조회 중...';
+  }
+  try {
+    const res = await fetch(baseUrl + '/live', { cache: 'no-store' });
+    if (!res.ok) throw new Error('서버 응답 오류 (' + res.status + ')');
+    const data = await res.json();
+
+    if (data.futures && typeof data.futures === 'object') {
+      state.marketsData.FUTURES = { ...(state.marketsData.FUTURES || {}), ...data.futures };
+    }
+
+    const dateKst = data.dateKst;
+    const fxNow = data.indices && Number.isFinite(data.indices.USDKRW) ? data.indices.USDKRW : null;
+    for (const mKey of ['KOSPI', 'KOSDAQ']) {
+      const liveIdx = data.indices && data.indices[mKey];
+      const rows = state.marketsData[mKey];
+      if (liveIdx && Number.isFinite(liveIdx.close) && Array.isArray(rows) && rows.length) {
+        const last = rows[rows.length - 1];
+        const useFx = fxNow || last[3];
+        if (last[0] === dateKst) {
+          rows[rows.length - 1] = [dateKst, liveIdx.close, liveIdx.pct, useFx, last[4] ?? null, last[5] ?? null];
+        } else if (dateKst && dateKst > last[0]) {
+          rows.push([dateKst, liveIdx.close, liveIdx.pct, useFx, null, null]);
+        }
+      }
+    }
+
+    state.isLiveIntraday = true;
+    state.liveUpdatedKst = data.updatedKst || '';
+    recomputeMarket(state.key, false);
+    const warnMsg = data.warnings && data.warnings.length ? ' (' + data.warnings[0] + ')' : '';
+    showToast('실시간 시세를 반영해 확률을 재계산했습니다.' + warnMsg);
+  } catch (err) {
+    showToast('실시간 조회 실패: ' + err.message, true);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '실시간 조회';
+    }
+  }
 }
 
 function initApp() {
@@ -1054,6 +1138,8 @@ function initApp() {
     renderAll();
   });
 
+  const liveBtn = document.getElementById('live-fetch-btn');
+  if (liveBtn) liveBtn.addEventListener('click', fetchLiveSnapshot);
   recomputeMarket('KOSPI', false);
   switchTab('forecast');
 }
