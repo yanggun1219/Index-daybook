@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="ko" class="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <meta name="theme-color" content="#070d19" />
+  <title>지수 관측소 위젯 — 코스피 · 코스닥 · SK하이닉스 · 삼성전자</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700;800&family=Noto+Sans+KR:wght@500;700&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background-color: #070d19;
+      color: #f1f5f9;
+      font-family: 'Inter', 'Noto Sans KR', system-ui, -apple-system, sans-serif;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .w-tile {
+      background: #0f172a;
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      transition: border-color 0.2s ease, transform 0.15s ease;
+    }
+    .w-tile:active {
+      transform: scale(0.98);
+    }
+    @keyframes fadeTile {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .tile-anim {
+      animation: fadeTile 0.35s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+    }
+  </style>
+</head>
+<body class="p-2.5 select-none">
+  <div class="max-w-md mx-auto">
+    <header class="flex items-center justify-between gap-2 mb-2 px-0.5">
+      <a href="index.html" target="_blank" rel="noopener noreferrer" class="flex items-center gap-1.5 min-w-0">
+        <span class="w-2 h-2 rounded-full bg-teal-400 shrink-0 animate-pulse"></span>
+        <span class="text-xs font-extrabold tracking-tight text-white truncate">지수 관측소</span>
+        <span id="w-updated" class="text-[10px] text-slate-400 tabular-nums truncate">로딩 중...</span>
+      </a>
+      <div class="flex items-center gap-1 shrink-0">
+        <button id="w-config-btn" type="button" title="Worker 주소 설정" class="w-7 h-7 flex items-center justify-center rounded-lg bg-slate-800/90 border border-slate-700 text-slate-300 hover:text-white text-xs transition">⚙️</button>
+        <button id="w-refresh-btn" type="button" title="새로고침" class="w-7 h-7 flex items-center justify-center rounded-lg bg-teal-600 hover:bg-teal-500 text-white text-xs font-bold transition">↻</button>
+      </div>
+    </header>
+
+    <div id="w-config-bar" class="hidden mb-2 p-2 rounded-xl bg-slate-900 border border-slate-700/80">
+      <div class="text-[10px] text-slate-400 mb-1">Cloudflare Workers URL (웹 위젯 앱에서는 <code class="text-teal-300">?worker=주소</code>로 넣으면 자동 연결됩니다)</div>
+      <div class="flex gap-1.5">
+        <input id="w-url-input" type="url" placeholder="https://index-daybook-live.xxx.workers.dev" class="flex-1 text-[11px] bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-slate-100" />
+        <button id="w-url-save" type="button" class="px-2.5 py-1.5 rounded-lg bg-teal-600 text-white text-[11px] font-bold">저장</button>
+      </div>
+    </div>
+
+    <div id="w-grid" class="grid grid-cols-2 gap-2"></div>
+  </div>
+
+  <script src="data.js"></script>
+  <script src="model.js"></script>
+  <script>
+    const WIDGET_ITEMS = [
+      { id: 'KOSPI', type: 'index', name: '코스피', sub: '다음 거래일' },
+      { id: 'KOSDAQ', type: 'index', name: '코스닥', sub: '다음 거래일' },
+      { id: '000660', type: 'stock', name: 'SK하이닉스', sector: 'semi', sub: '반도체 모델' },
+      { id: '005930', type: 'stock', name: '삼성전자', sector: 'semi', sub: '반도체 모델' }
+    ];
+
+    function getWorkerUrl() {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const fromQuery = (params.get('worker') || '').trim().replace(/\/+$/, '');
+        if (fromQuery && /^https:\/\//.test(fromQuery)) {
+          try { localStorage.setItem('daybook_worker_url', fromQuery); } catch (_) {}
+          return fromQuery;
+        }
+      } catch (_) {}
+      try {
+        return (localStorage.getItem('daybook_worker_url') || '').trim().replace(/\/+$/, '');
+      } catch (_) {
+        return '';
+      }
+    }
+
+    const fmtPct = x => (Number.isFinite(x) ? (x * 100).toFixed(1) + '%' : '-');
+    const fmtMove = x => (Number.isFinite(x) ? (x > 0 ? '+' : '') + x.toFixed(2) + '%' : '-');
+
+    function renderTiles(cards) {
+      const grid = document.getElementById('w-grid');
+      if (!grid) return;
+      grid.innerHTML = cards
+        .map(c => {
+          const hasP = Number.isFinite(c.p);
+          const isBull = hasP && c.p >= 0.5;
+          const pColor = !hasP ? 'text-slate-500' : isBull ? 'text-rose-400' : 'text-sky-400';
+          const barColor = !hasP
+            ? 'bg-slate-700'
+            : isBull
+              ? 'bg-gradient-to-r from-rose-500 to-rose-300'
+              : 'bg-gradient-to-r from-blue-600 to-sky-400';
+          const glow = !hasP
+            ? 'none'
+            : isBull
+              ? 'radial-gradient(circle at 15% 0%, rgba(251,113,133,0.16), transparent 65%)'
+              : 'radial-gradient(circle at 15% 0%, rgba(56,189,248,0.16), transparent 65%)';
+          const moveColor = Number.isFinite(c.ret)
+            ? c.ret >= 0 ? 'text-rose-400' : 'text-sky-400'
+            : 'text-slate-500';
+          const pctW = hasP ? (c.p * 100).toFixed(1) : '0';
+
+          return (
+            '<div class="w-tile tile-anim rounded-2xl p-3 flex flex-col justify-between" style="background-image:' + glow + '">' +
+            '<div class="flex items-center justify-between gap-1">' +
+            '<span class="text-xs font-bold text-slate-100 truncate">' + c.name + '</span>' +
+            (c.badge
+              ? '<span class="text-[9px] font-bold px-1.5 py-0.5 rounded-full ' + c.badgeCls + ' shrink-0">' + c.badge + '</span>'
+              : '<span class="text-[10px] text-slate-500 shrink-0">' + c.sub + '</span>') +
+            '</div>' +
+            '<div class="mt-1.5 flex items-baseline justify-between gap-1 tabular-nums">' +
+            '<span class="text-2xl font-extrabold tracking-tight ' + pColor + '">' + (hasP ? fmtPct(c.p) : (c.statusText || '-')) + '</span>' +
+            '<span class="text-[11px] font-bold ' + moveColor + '">' + (Number.isFinite(c.ret) ? fmtMove(c.ret) : '') + '</span>' +
+            '</div>' +
+            '<div class="mt-2 relative h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">' +
+            '<div class="absolute left-1/2 top-0 bottom-0 w-px bg-slate-500/60"></div>' +
+            '<div class="h-full rounded-full ' + barColor + '" style="width:' + pctW + '%"></div>' +
+            '</div>' +
+            '<div class="mt-1.5 flex items-center justify-between text-[10px] text-slate-400 tabular-nums">' +
+            '<span class="truncate">' + (c.priceText || '-') + '</span>' +
+            '<span class="truncate">' + (c.note || '') + '</span>' +
+            '</div>' +
+            '</div>'
+          );
+        })
+        .join('');
+    }
+
+    function computeIndexCard(mData, key, label) {
+      const rows = mData[key] || [];
+      let lv = -1;
+      for (let i = 24; i < rows.length; i++) if (adjacent(rows[i - 1], rows[i])) lv = i;
+      if (lv < 0) return { name: label, sub: '다음 거래일', p: null, statusText: '-', priceText: '-' };
+      const rawF = forecastSingleDay(rows, lv, key, mData, 1);
+      const newsScore = mData.NEWS && Number.isFinite(mData.NEWS.sentiment) ? mData.NEWS.sentiment : 0;
+      const fut = mData.FUTURES || {};
+      const krFut = Number.isFinite(fut.K200_pct) ? fut.K200_pct : 0;
+      const krBasis = Number.isFinite(fut.K200_basis) ? fut.K200_basis : 0;
+      let adj = applyNewsOverlay(rawF, newsScore, key, true);
+      adj = applyKrFuturesOverlay(adj, krFut, krBasis, key, true);
+      if (typeof applyWeekendOilOverlay === 'function') {
+        adj = applyWeekendOilOverlay(adj, fut.CL_pct, Boolean(fut.CL_weekend), true);
+      }
+      const r = rows[lv];
+      const badge = adj.p >= 0.65 ? '상승 우위' : adj.p <= 0.35 ? '하락 경계' : '관망';
+      const badgeCls =
+        adj.p >= 0.65
+          ? 'bg-rose-500/20 text-rose-300'
+          : adj.p <= 0.35
+            ? 'bg-sky-500/20 text-sky-300'
+            : 'bg-slate-800 text-slate-300';
+      return {
+        name: label,
+        sub: '다음 거래일',
+        p: adj.p,
+        ret: r[2],
+        priceText: r[1].toLocaleString('ko-KR') + ' pt',
+        badge,
+        badgeCls,
+        note: adj.low.toFixed(1) + '~+' + adj.high.toFixed(1) + '%'
+      };
+    }
+
+    async function loadWidgetData() {
+      const updatedEl = document.getElementById('w-updated');
+      const refreshBtn = document.getElementById('w-refresh-btn');
+      if (refreshBtn) refreshBtn.disabled = true;
+
+      const mData = JSON.parse(JSON.stringify(markets));
+      const baseUrl = getWorkerUrl();
+
+      // 1단계: 오프라인 스냅샷으로 코스피·코스닥 즉시 표시
+      const initCards = [
+        computeIndexCard(mData, 'KOSPI', '코스피'),
+        computeIndexCard(mData, 'KOSDAQ', '코스닥'),
+        { name: 'SK하이닉스', sub: '반도체', p: null, statusText: baseUrl ? '조회중' : 'URL필요', priceText: baseUrl ? '불러오는 중...' : '⚙️ Workers 연결' },
+        { name: '삼성전자', sub: '반도체', p: null, statusText: baseUrl ? '조회중' : 'URL필요', priceText: baseUrl ? '불러오는 중...' : '⚙️ Workers 연결' }
+      ];
+      renderTiles(initCards);
+
+      if (!baseUrl) {
+        if (updatedEl) updatedEl.textContent = '스냅샷 기준';
+        if (refreshBtn) refreshBtn.disabled = false;
+        return;
+      }
+
+      try {
+        const [liveRes, skRes, ssRes] = await Promise.all([
+          fetch(baseUrl + '/live', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null),
+          fetch(baseUrl + '/stock?q=000660&sector=semi', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null),
+          fetch(baseUrl + '/stock?q=005930&sector=semi', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null)
+        ]);
+
+        if (liveRes) {
+          if (liveRes.futures) mData.FUTURES = { ...(mData.FUTURES || {}), ...liveRes.futures };
+          if (liveRes.news && Array.isArray(liveRes.news.items) && liveRes.news.items.length) mData.NEWS = liveRes.news;
+          const dateKst = liveRes.dateKst;
+          const fxNow = liveRes.indices && Number.isFinite(liveRes.indices.USDKRW) ? liveRes.indices.USDKRW : null;
+          for (const mk of ['KOSPI', 'KOSDAQ']) {
+            const li = liveRes.indices && liveRes.indices[mk];
+            const rows = mData[mk];
+            if (li && Number.isFinite(li.close) && rows && rows.length) {
+              const last = rows[rows.length - 1];
+              const fx = fxNow || last[3];
+              if (last[0] === dateKst) rows[rows.length - 1] = [dateKst, li.close, li.pct, fx, last[4] ?? null, last[5] ?? null];
+              else if (dateKst && dateKst > last[0] && Math.abs(li.close - last[1]) > 0.005) {
+                const cp = Number((((li.close / last[1]) - 1) * 100).toFixed(2));
+                rows.push([dateKst, li.close, cp, fx, null, null]);
+              }
+            }
+          }
+        }
+
+        const buildStockCard = (raw, fallbackName) => {
+          if (!raw || raw.error) return { name: fallbackName, sub: '반도체', p: null, statusText: '오류', priceText: '조회 실패' };
+          const an = analyzeIndividualStock(raw);
+          if (an.error) return { name: fallbackName, sub: '반도체', p: null, statusText: '부족', priceText: '표본 부족' };
+          const adj = typeof applyStockPerpOverlay === 'function' ? applyStockPerpOverlay(an, true) : an;
+          const badge = adj.p >= 0.62 ? '상승 우위' : adj.p <= 0.38 ? '하락 경계' : '관망';
+          const badgeCls =
+            adj.p >= 0.62
+              ? 'bg-rose-500/20 text-rose-300'
+              : adj.p <= 0.38
+                ? 'bg-sky-500/20 text-sky-300'
+                : 'bg-slate-800 text-slate-300';
+          return {
+            name: adj.name || fallbackName,
+            sub: '반도체',
+            p: adj.p,
+            ret: adj.ret1,
+            priceText: Math.round(adj.close).toLocaleString('ko-KR') + '원',
+            badge,
+            badgeCls,
+            note: adj.perpApplied ? '24H ' + (adj.perpImpactPct >= 0 ? '+' : '') + adj.perpImpactPct.toFixed(1) + '%p' : '5년 모델'
+          };
+        };
+
+        renderTiles([
+          computeIndexCard(mData, 'KOSPI', '코스피'),
+          computeIndexCard(mData, 'KOSDAQ', '코스닥'),
+          buildStockCard(skRes, 'SK하이닉스'),
+          buildStockCard(ssRes, '삼성전자')
+        ]);
+
+        const stamp = (liveRes && liveRes.updatedKst) || (skRes && skRes.updatedKst) || '';
+        if (updatedEl) updatedEl.textContent = stamp ? stamp.slice(5, 16) + ' KST' : '실시간 완료';
+      } catch (_) {
+        if (updatedEl) updatedEl.textContent = '연결 지연';
+      } finally {
+        if (refreshBtn) refreshBtn.disabled = false;
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      const cfgBtn = document.getElementById('w-config-btn');
+      const cfgBar = document.getElementById('w-config-bar');
+      const urlInp = document.getElementById('w-url-input');
+      const urlSave = document.getElementById('w-url-save');
+      const refBtn = document.getElementById('w-refresh-btn');
+
+      if (urlInp) urlInp.value = getWorkerUrl();
+      if (cfgBtn && cfgBar) {
+        cfgBtn.addEventListener('click', () => cfgBar.classList.toggle('hidden'));
+      }
+      if (urlSave && urlInp) {
+        urlSave.addEventListener('click', () => {
+          const v = (urlInp.value || '').trim().replace(/\/+$/, '');
+          try { localStorage.setItem('daybook_worker_url', v); } catch (_) {}
+          if (cfgBar) cfgBar.classList.add('hidden');
+          loadWidgetData();
+        });
+      }
+      if (refBtn) refBtn.addEventListener('click', loadWidgetData);
+
+      loadWidgetData();
+      setInterval(loadWidgetData, 15 * 60 * 1000);
+    });
+  </script>
+</body>
+</html>
