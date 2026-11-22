@@ -304,28 +304,26 @@ async function fetchYahooNewsPool() {
 }
 
 async function fetchLiveNews(kst) {
-  const [hk, mk, gnKr, cnbc, yh] = await Promise.all([
+  const [yna, hk, mk, ed, gnKr, wsj, mw, cnbc, yh] = await Promise.all([
+    fetchRssPool('연합뉴스', 'https://www.yna.co.kr/rss/economy.xml', false),
     fetchRssPool('한국경제', 'https://www.hankyung.com/feed/finance', false),
     fetchRssPool('매일경제', 'https://www.mk.co.kr/rss/50200011/', false),
+    fetchRssPool('이데일리', 'https://rss.edaily.co.kr/economy_news.xml', false),
     fetchRssPool('구글뉴스 증시', 'https://news.google.com/rss/search?q=%EC%BD%94%EC%8A%A4%ED%94%BC+OR+%EB%82%98%EC%8A%A4%EB%8B%A5+OR+%EC%97%B0%EC%A4%80+when:1d&hl=ko&gl=KR&ceid=KR:ko', false),
+    fetchRssPool('WSJ', 'https://feeds.content.dowjones.io/public/rss/RSSMarketsMain', true),
+    fetchRssPool('MarketWatch', 'https://feeds.content.dowjones.io/public/rss/mw_topstories', true),
     fetchRssPool('CNBC', 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664', true),
     fetchYahooNewsPool()
   ]);
 
-  const all = [...hk, ...mk, ...gnKr, ...cnbc, ...yh].sort((a, b) => b.pubMs - a.pubMs);
+  const all = [...yna, ...hk, ...mk, ...ed, ...gnKr, ...wsj, ...mw, ...cnbc, ...yh].sort((a, b) => b.pubMs - a.pubMs);
   const picked = [];
   const seen = new Set();
-
-  // 최신순 최대 15건 수집 (국내 최대 10 + 글로벌 최대 5)
-  let krCnt = 0;
-  let enCnt = 0;
+  // 매체 제한 없이 9개 언론사 통합 순수 최신 속보순 상위 15건 선별
   for (const item of all) {
     if (seen.has(item.title)) continue;
-    if (!item.isEnglish && krCnt >= 10) continue;
-    if (item.isEnglish && enCnt >= 5) continue;
     seen.add(item.title);
     picked.push(item);
-    if (item.isEnglish) enCnt++; else krCnt++;
     if (picked.length >= 15) break;
   }
   picked.sort((a, b) => b.pubMs - a.pubMs);
@@ -461,7 +459,7 @@ export default {
     }
 
     const cache = caches.default;
-    const respCacheKey = new Request('https://kis-live-cache.internal/v56/live');
+    const respCacheKey = new Request('https://kis-live-cache.internal/v58/live');
     const cachedResp = await cache.match(respCacheKey);
     if (cachedResp) {
       const body = await cachedResp.text();

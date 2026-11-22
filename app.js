@@ -1,4 +1,4 @@
-// 지수 관측소 v5.7 — 듀얼 호라이즌(1일·5일) + 고확신 신호 필터 + 선물·원자재·뉴스 모바일 앱
+// 지수 관측소 v5.8 — 듀얼 호라이즌(1일·5일) + 고확신 신호 필터 + 선물·원자재·뉴스 모바일 앱
 
 const MARKET_NAMES = {
   KOSPI: '코스피',
@@ -475,7 +475,7 @@ function renderForecast() {
     MARKET_NAMES[state.key] +
     ' ' +
     horizonLabel +
-    ' (v5.7)</span>' +
+    ' (v5.8)</span>' +
     '<div class="flex items-center gap-1.5">' +
     (state.isLiveIntraday ? '<span class="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/25 text-amber-200 border border-amber-400/40 font-semibold">장중 실시간 잠정</span>' : '') +
     '<span class="text-[11px] px-2 py-0.5 rounded-full ' +
@@ -633,40 +633,35 @@ function renderForecast() {
 
 
 
-function buildLeftToRightAnimation(pointCount, totalMs) {
-  const n = Math.max(1, pointCount);
-  const delayPerPoint = (totalMs || 550) / n;
-  const previousY = ctx => {
-    if (ctx.index === 0) return ctx.chart.scales.y.getPixelForValue(ctx.parsed.y);
-    const meta = ctx.chart.getDatasetMeta(ctx.datasetIndex);
-    const prev = meta.data[ctx.index - 1];
-    return prev ? prev.getProps(['y'], true).y : ctx.chart.scales.y.getPixelForValue(ctx.parsed.y);
-  };
-  return {
-    x: {
-      type: 'number',
-      easing: 'linear',
-      duration: delayPerPoint,
-      from: NaN,
-      delay(ctx) {
-        if (ctx.type !== 'data' || ctx.xStarted) return 0;
-        ctx.xStarted = true;
-        return ctx.index * delayPerPoint;
-      }
-    },
-    y: {
-      type: 'number',
-      easing: 'linear',
-      duration: delayPerPoint,
-      from: previousY,
-      delay(ctx) {
-        if (ctx.type !== 'data' || ctx.yStarted) return 0;
-        ctx.yStarted = true;
-        return ctx.index * delayPerPoint;
-      }
+const leftToRightRevealPlugin = {
+  id: 'leftToRightReveal',
+  beforeInit(chart) {
+    chart._revealStart = performance.now();
+    chart._destroyed = false;
+  },
+  beforeDatasetsDraw(chart) {
+    const { ctx, chartArea } = chart;
+    if (!chartArea) return;
+    const elapsed = performance.now() - (chart._revealStart || 0);
+    const t = Math.min(1, Math.max(0, elapsed / 650));
+    const eased = 1 - Math.pow(1 - t, 3);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(chartArea.left, 0, (chartArea.right - chartArea.left) * eased + 2, chart.height);
+    ctx.clip();
+    if (t < 1 && !chart._destroyed) {
+      requestAnimationFrame(() => {
+        if (chart && chart.ctx && !chart._destroyed) chart.draw();
+      });
     }
-  };
-}
+  },
+  afterDatasetsDraw(chart) {
+    if (chart.chartArea) chart.ctx.restore();
+  },
+  beforeDestroy(chart) {
+    chart._destroyed = true;
+  }
+};
 
 async function renderFuturesChart() {
   const key = state.selectedFutChart;
@@ -739,6 +734,7 @@ async function renderFuturesChart() {
 
   state.futChartInstance = new Chart(freshCanvas, {
     type: 'line',
+    plugins: [leftToRightRevealPlugin],
     data: {
       labels,
       datasets: [{
@@ -757,7 +753,6 @@ async function renderFuturesChart() {
       responsive: true,
       maintainAspectRatio: false,
       animation: false,
-      animations: buildLeftToRightAnimation(points.length, 550),
       interaction: { mode: 'index', intersect: false },
       plugins: {
         legend: { display: false },
@@ -811,6 +806,7 @@ function renderPriceChart() {
 
   state.chartInstance = new Chart(canvas, {
     type: 'line',
+    plugins: [leftToRightRevealPlugin],
     data: {
       labels,
       datasets: [
@@ -856,7 +852,6 @@ function renderPriceChart() {
       responsive: true,
       maintainAspectRatio: false,
       animation: false,
-      animations: buildLeftToRightAnimation(labels.length, 550),
       plugins: {
         legend: {
           display: true,
@@ -1144,7 +1139,7 @@ function renderBacktest() {
     '</tr></thead>' +
     '<tbody class="divide-y divide-slate-100 tabular-nums">' +
     '<tr class="bg-teal-50/50 font-semibold text-slate-900">' +
-    '<td class="py-2.5 pr-2">개선 v5.7 (시장별 전용 엔진)</td>' +
+    '<td class="py-2.5 pr-2">개선 v5.8 (시장별 전용 엔진)</td>' +
     '<td class="py-2.5 px-2 text-right text-teal-800">' +
     fmtB(brierV4) +
     '</td>' +
@@ -1243,7 +1238,7 @@ function handleFileImport(event) {
         validateImport(parsed);
         state.marketsData = { ...state.marketsData, ...parsed };
         recomputeMarket(state.key, false);
-        showToast('데이터를 반영해 v5.7 전체 모델을 재계산했습니다.');
+        showToast('데이터를 반영해 v5.8 전체 모델을 재계산했습니다.');
       } else {
         const lines = text
           .split(/\r?\n/)
