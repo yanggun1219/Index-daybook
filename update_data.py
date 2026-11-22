@@ -344,7 +344,7 @@ def fetch_global_news(limit: int = 15):
                 continue
             seen.add(title)
             ko_title = _translate_en_to_ko(title)
-            ko_url = f"https://translate.google.com/translate?sl=en&tl=ko&u={urllib.parse.quote(link, safe='')}" if link else ""
+            ko_url = link
             items.append({
                 "title": ko_title,
                 "summary": f"원문: {title}" if ko_title != title else "",

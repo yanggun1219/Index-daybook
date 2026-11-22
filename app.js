@@ -1,4 +1,4 @@
-// 지수 관측소 v5.9 — 듀얼 호라이즌(1일·5일) + 고확신 신호 필터 + 선물·원자재·뉴스 모바일 앱
+// 지수 관측소 v6.0 — 다크모드 금융 터미널 리뉴얼 + 보드/카운트업/차트 드로우 애니메이션
 
 const MARKET_NAMES = {
   KOSPI: '코스피',
@@ -6,11 +6,27 @@ const MARKET_NAMES = {
   NASDAQ: '나스닥 종합'
 };
 
+function readStorage(key, fallback) {
+  try {
+    const v = typeof localStorage !== 'undefined' ? localStorage.getItem(key) : null;
+    return v !== null ? v : fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function writeStorage(key, val) {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(key, val);
+  } catch (_) {}
+}
+
 const state = {
   marketsData: JSON.parse(JSON.stringify(markets)),
   key: 'KOSPI',
   horizon: 1, // 1 = 다음 거래일, 5 = 향후 5거래일(1주 추세)
   tab: 'forecast',
+  theme: readStorage('daybook_theme', 'dark'),
   dateIdx: -1,
   latestValidIdx: -1,
   currentForecast: null,
@@ -24,13 +40,15 @@ const state = {
   useKrFutOverlay: true,
   isLiveIntraday: false,
   liveUpdatedKst: '',
-  workerUrl: (typeof localStorage !== 'undefined' && localStorage.getItem('daybook_worker_url')) || '',
+  workerUrl: readStorage('daybook_worker_url', ''),
   newsExpanded: false,
   selectedFutChart: null,
   futChartTf: '15m',
   futChartCache: {},
   futChartInstance: null,
-  chartInstance: null
+  chartInstance: null,
+  animateBoard: true,
+  activeRafs: []
 };
 
 const fmtPct = x => (x === null || x === undefined || Number.isNaN(x) ? '-' : (100 * x).toFixed(1) + '%');
@@ -47,12 +65,108 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
+function isDark() {
+  return state.theme === 'dark';
+}
+
+function applyTheme(mode, redrawCharts) {
+  state.theme = mode === 'light' ? 'light' : 'dark';
+  const dark = isDark();
+  document.documentElement.classList.toggle('dark', dark);
+  writeStorage('daybook_theme', state.theme);
+  const btn = document.getElementById('theme-toggle-btn');
+  if (btn) {
+    btn.textContent = dark ? '☀️' : '🌙';
+    btn.setAttribute('aria-label', dark ? '라이트모드로 전환' : '다크모드로 전환');
+  }
+  const meta = document.getElementById('theme-color-meta');
+  if (meta) meta.setAttribute('content', dark ? '#070d19' : '#f1f5f9');
+  if (redrawCharts) {
+    renderFuturesChart();
+    renderPriceChart();
+  }
+}
+
+function cancelActiveAnimations() {
+  for (const id of state.activeRafs) cancelAnimationFrame(id);
+  state.activeRafs = [];
+}
+
+function runCountUps(root) {
+  cancelActiveAnimations();
+  const els = root.querySelectorAll('[data-countup]');
+  const reduceMotion =
+    typeof window !== 'undefined' &&
+    window.matchMedia &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  for (const el of els) {
+    const target = Number(el.dataset.target);
+    const decimals = Number(el.dataset.decimals || 0);
+    const suffix = el.dataset.suffix || '';
+    const prefix = el.dataset.prefix || '';
+    if (!Number.isFinite(target)) continue;
+    if (reduceMotion) {
+      el.textContent = prefix + target.toFixed(decimals) + suffix;
+      continue;
+    }
+    const duration = Number(el.dataset.duration || 640);
+    const start = performance.now();
+    const step = now => {
+      const t = Math.min(1, (now - start) / duration);
+      const eased = 1 - Math.pow(1 - t, 3);
+      const cur = target * eased;
+      el.textContent = prefix + cur.toFixed(decimals) + suffix;
+      if (t < 1) {
+        const rafId = requestAnimationFrame(step);
+        state.activeRafs.push(rafId);
+      } else {
+        el.textContent = prefix + target.toFixed(decimals) + suffix;
+      }
+    };
+    const rafId = requestAnimationFrame(step);
+    state.activeRafs.push(rafId);
+  }
+
+  // 히어로 게이지 바 애니메이션
+  const gaugeBar = root.querySelector('[data-gauge-target]');
+  if (gaugeBar) {
+    const targetW = gaugeBar.dataset.gaugeTarget;
+    if (reduceMotion) {
+      gaugeBar.style.width = targetW;
+    } else {
+      gaugeBar.style.width = '0%';
+      const rafId = requestAnimationFrame(() => {
+        const rafId2 = requestAnimationFrame(() => {
+          gaugeBar.style.width = targetW;
+        });
+        state.activeRafs.push(rafId2);
+      });
+      state.activeRafs.push(rafId);
+    }
+  }
+}
+
+function triggerChartReveal(wrapId) {
+  const wrap = document.getElementById(wrapId);
+  if (!wrap) return;
+  wrap.classList.remove('chart-reveal-anim');
+  void wrap.offsetWidth;
+  wrap.classList.add('chart-reveal-anim');
+}
+
+function boardCls(step) {
+  return state.animateBoard ? ' board-enter stagger-' + step : '';
+}
+
 function showToast(msg, isError) {
   const el = document.getElementById('toast');
   el.textContent = msg;
   el.className =
-    'fixed bottom-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-xl text-sm font-medium shadow-lg transition-opacity ' +
-    (isError ? 'bg-rose-700 text-white' : 'bg-slate-900 text-white');
+    'fixed bottom-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-xl text-sm font-medium shadow-xl border transition-opacity ' +
+    (isError
+      ? 'bg-rose-700 text-white border-rose-500/40'
+      : 'bg-slate-900 dark:bg-slate-800 text-white border-slate-700');
   el.classList.remove('hidden');
   clearTimeout(showToast._timer);
   showToast._timer = setTimeout(() => el.classList.add('hidden'), 3200);
@@ -84,13 +198,14 @@ function updateHorizonButtons() {
     const active = Number(btn.dataset.h) === state.horizon;
     btn.setAttribute('aria-pressed', String(active));
     btn.className = active
-      ? 'flex-1 py-1.5 px-3 rounded-lg text-xs font-bold bg-teal-700 text-white shadow-sm transition'
-      : 'flex-1 py-1.5 px-3 rounded-lg text-xs font-semibold text-slate-600 hover:text-slate-900 transition';
+      ? 'flex-1 py-1.5 px-3 rounded-lg text-xs font-bold bg-teal-600 text-white shadow-sm transition whitespace-nowrap'
+      : 'flex-1 py-1.5 px-3 rounded-lg text-xs font-semibold text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 transition whitespace-nowrap';
   }
 }
 
-function recomputeMarket(id, keepDate) {
+function recomputeMarket(id, keepDate, animate) {
   state.key = id;
+  state.animateBoard = animate !== false;
   const rows = state.marketsData[id] || [];
   state.historyV4 = null;
   state.historyV2 = null;
@@ -144,8 +259,8 @@ function recomputeMarket(id, keepDate) {
     const active = btn.dataset.key === id;
     btn.setAttribute('aria-pressed', String(active));
     btn.className = active
-      ? 'flex-1 py-2 px-3 rounded-lg text-sm font-semibold bg-slate-900 text-white shadow-sm transition'
-      : 'flex-1 py-2 px-3 rounded-lg text-sm font-medium text-slate-600 hover:text-slate-900 transition';
+      ? 'flex-1 py-2 px-3 rounded-lg text-sm font-bold bg-slate-900 dark:bg-teal-500/20 text-white dark:text-teal-300 border border-transparent dark:border-teal-400/40 shadow-sm transition'
+      : 'flex-1 py-2 px-3 rounded-lg text-sm font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 transition';
   }
   updateHorizonButtons();
   renderAll();
@@ -153,25 +268,64 @@ function recomputeMarket(id, keepDate) {
 
 function switchTab(tabId) {
   state.tab = tabId;
+  state.animateBoard = true;
   for (const btn of document.querySelectorAll('#view-tabs button')) {
     const active = btn.dataset.tab === tabId;
     btn.setAttribute('aria-selected', String(active));
     btn.className = active
-      ? 'flex-1 py-2 text-sm font-semibold border-b-2 border-teal-700 text-teal-800 transition'
-      : 'flex-1 py-2 text-sm font-medium border-b-2 border-transparent text-slate-500 hover:text-slate-800 transition';
+      ? 'flex-1 py-2.5 text-sm font-bold border-b-2 border-teal-600 dark:border-teal-400 text-teal-800 dark:text-teal-300 transition'
+      : 'flex-1 py-2.5 text-sm font-medium border-b-2 border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 transition';
   }
   document.getElementById('panel-forecast').classList.toggle('hidden', tabId !== 'forecast');
   document.getElementById('panel-simulator').classList.toggle('hidden', tabId !== 'simulator');
   document.getElementById('panel-backtest').classList.toggle('hidden', tabId !== 'backtest');
-  if (tabId === 'forecast') renderPriceChart();
+  if (tabId === 'forecast') {
+    renderPriceChart();
+    renderFuturesChart();
+  }
+  if (tabId === 'simulator') renderSimulator();
   if (tabId === 'backtest') renderBacktest();
 }
 
-function renderFuturesAndNewsSection(f) {
-  const fut = state.marketsData.FUTURES;
-  const news = state.marketsData.NEWS;
+function getSparkSeries(key) {
+  const fut = state.marketsData.FUTURES || {};
+  let series = fut.series && Array.isArray(fut.series[key]) ? fut.series[key] : [];
+  if (!series.length && (key === 'CL' || key === 'GC') && Array.isArray(state.marketsData[key])) {
+    series = state.marketsData[key].slice(-16).map(r => [r[0].slice(5), r[1]]);
+  }
+  if (!series.length && key === 'K200' && Array.isArray(state.marketsData.KOSPI)) {
+    series = state.marketsData.KOSPI.slice(-16).map(r => [r[0].slice(5), r[1]]);
+  }
+  return series.map(p => Number(p[1])).filter(Number.isFinite);
+}
 
-  let html = '';
+function buildMiniSparkline(key, isUp) {
+  const vals = getSparkSeries(key);
+  if (vals.length < 3) return '';
+  const min = Math.min(...vals);
+  const max = Math.max(...vals);
+  const span = max - min || 1;
+  const w = 56;
+  const h = 20;
+  const pts = vals.map((v, idx) => {
+    const x = (idx / (vals.length - 1)) * w;
+    const y = h - 2 - ((v - min) / span) * (h - 4);
+    return x.toFixed(1) + ',' + y.toFixed(1);
+  });
+  const stroke = isUp ? '#fb7185' : '#60a5fa';
+  const fill = isUp ? 'rgba(251, 113, 133, 0.14)' : 'rgba(96, 165, 250, 0.14)';
+  const areaD = 'M0,' + h + ' L' + pts.join(' L') + ' L' + w + ',' + h + ' Z';
+  const lineD = 'M' + pts.join(' L');
+  return (
+    '<svg viewBox="0 0 ' + w + ' ' + h + '" class="w-14 h-5 shrink-0 overflow-visible" aria-hidden="true">' +
+    '<path d="' + areaD + '" fill="' + fill + '" />' +
+    '<path d="' + lineD + '" fill="none" stroke="' + stroke + '" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" pathLength="100" class="spark-path" />' +
+    '</svg>'
+  );
+}
+
+function renderFuturesCard(f) {
+  const fut = state.marketsData.FUTURES;
   const items =
     fut && typeof fut === 'object'
       ? [
@@ -184,86 +338,114 @@ function renderFuturesAndNewsSection(f) {
         ].filter(x => Number.isFinite(x.val))
       : [];
 
-  html +=
-    '<section class="mt-3 rounded-2xl bg-white border border-slate-200 p-4 shadow-sm">' +
-    '<div class="flex items-center justify-between mb-2">' +
-    '<div class="flex items-center gap-2">' +
-    '<h2 class="text-sm font-bold text-slate-900">국내·해외 선물 · 원자재</h2>' +
-    '<span class="text-[11px] text-slate-500">' +
+  let html =
+    '<section class="rounded-2xl surface-card p-4 shadow-sm' + boardCls(2) + '">' +
+    '<div class="flex items-center justify-between gap-2 mb-2.5">' +
+    '<div class="min-w-0">' +
+    '<h2 class="text-sm font-bold text-slate-900 dark:text-slate-100">국내·해외 선물 · 원자재</h2>' +
+    '<div class="text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">' +
     escapeHtml((fut && fut.updatedKst) || '수집 대기') +
-    '</span>' +
+    '</div>' +
     '</div>' +
     (state.key !== 'NASDAQ'
-      ? '<button id="toggle-krfut-overlay" type="button" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold transition ' +
-        (state.useKrFutOverlay ? 'bg-teal-700 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200') +
+      ? '<button id="toggle-krfut-overlay" type="button" class="px-2.5 py-1 rounded-lg text-[11px] font-bold transition shrink-0 ' +
+        (state.useKrFutOverlay
+          ? 'bg-teal-600 text-white shadow-sm'
+          : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700') +
         '">국내선물 ' +
         (state.useKrFutOverlay ? 'ON' : 'OFF') +
         '</button>'
       : '') +
     '</div>';
+
   if (items.length) {
     html +=
       '<div class="grid grid-cols-2 gap-2">' +
       items
         .map(it => {
           const pos = it.val >= 0;
+          const selected = state.selectedFutChart === it.key;
+          const spark = buildMiniSparkline(it.key, pos);
           return (
-            '<button type="button" data-fut-key="' + it.key + '" class="text-left w-full rounded-xl px-3 py-2 transition border ' +
-            (state.selectedFutChart === it.key ? 'bg-slate-100 border-teal-600 ring-1 ring-teal-600' : 'bg-slate-50 border-slate-100 hover:border-slate-300') +
+            '<button type="button" data-fut-key="' + it.key + '" class="text-left w-full rounded-xl px-3 py-2.5 transition border ' +
+            (selected
+              ? 'bg-teal-50/70 dark:bg-teal-500/10 border-teal-500 ring-1 ring-teal-500/70'
+              : 'surface-inset hover:border-slate-300 dark:hover:border-slate-600') +
             '">' +
-            '<div class="flex items-center justify-between text-[11px] text-slate-500">' +
-            '<span>' + it.label + '</span>' +
-            (Number.isFinite(it.basis) ? '<span class="text-[10px] font-semibold ' + (it.basis >= 0 ? 'text-red-600' : 'text-blue-600') + '">베이시스 ' + (it.basis >= 0 ? '+' : '') + it.basis.toFixed(2) + '</span>' : '') +
-            (Number.isFinite(it.funding) ? '<span class="text-[10px] font-semibold text-indigo-700">펀딩 ' + (it.funding >= 0 ? '+' : '') + it.funding.toFixed(3) + '%</span>' : '') +
+            '<div class="flex items-center justify-between gap-1 text-[11px] text-slate-500 dark:text-slate-400">' +
+            '<span class="truncate font-medium">' + it.label + '</span>' +
+            (Number.isFinite(it.basis)
+              ? '<span class="text-[10px] font-bold shrink-0 ' +
+                (it.basis >= 0 ? 'text-red-600 dark:text-rose-400' : 'text-blue-600 dark:text-sky-400') +
+                '">B ' + (it.basis >= 0 ? '+' : '') + it.basis.toFixed(1) + '</span>'
+              : '') +
+            (Number.isFinite(it.funding)
+              ? '<span class="text-[10px] font-semibold shrink-0 text-indigo-600 dark:text-indigo-300">F ' +
+                (it.funding >= 0 ? '+' : '') + it.funding.toFixed(3) + '%</span>'
+              : '') +
             '</div>' +
-            '<div class="mt-0.5 flex items-baseline justify-between tabular-nums">' +
-            '<span class="text-xs font-semibold text-slate-800">' +
+            '<div class="mt-1 flex items-end justify-between gap-1.5">' +
+            '<div class="min-w-0 tabular-nums">' +
+            '<div class="text-xs font-bold text-slate-900 dark:text-slate-100 leading-tight">' +
             (Number.isFinite(it.price) ? it.price.toLocaleString('en-US') : '-') +
-            '</span>' +
-            '<span class="text-xs font-bold ' +
-            (pos ? 'text-red-600' : 'text-blue-600') +
+            '</div>' +
+            '<div class="text-xs font-extrabold mt-0.5 ' +
+            (pos ? 'text-red-600 dark:text-rose-400' : 'text-blue-600 dark:text-sky-400') +
             '">' +
             fmtMove(it.val) +
-            '</span>' +
+            '</div>' +
+            '</div>' +
+            spark +
             '</div>' +
             '</button>'
           );
         })
         .join('') +
       '</div>' +
-      '<div class="mt-2 text-[11px] text-slate-400">각 항목을 누르면 분봉(15분)·시간봉·일봉 추이 그래프가 열립니다.</div>' +
+      '<div class="mt-2 text-[11px] text-slate-400 dark:text-slate-500">각 타일을 누르면 15분봉·1시간봉·일봉 상세 차트가 열립니다. (B=베이시스, F=펀딩비)</div>' +
       (state.selectedFutChart
-        ? '<div class="mt-2.5 pt-2.5 border-t border-slate-100">' +
+        ? '<div class="mt-3 pt-3 border-t border-slate-100 dark:border-slate-800">' +
           '<div class="flex items-center justify-between gap-2 mb-2 flex-wrap">' +
-          '<span id="fut-chart-title" class="text-xs font-bold text-slate-800"></span>' +
+          '<span id="fut-chart-title" class="text-xs font-bold text-slate-800 dark:text-slate-100"></span>' +
           '<div class="flex items-center gap-1">' +
-          ['15m:15분봉', '1h:1시간봉', '1d:일봉'].map(spec => {
-            const [tfCode, tfLbl] = spec.split(':');
-            const active = state.futChartTf === tfCode;
-            return '<button type="button" data-fut-tf="' + tfCode + '" class="px-2 py-0.5 rounded text-[11px] font-semibold transition ' +
-              (active ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200') + '">' + tfLbl + '</button>';
-          }).join('') +
-          '<button id="fut-chart-close" type="button" class="ml-1 text-[11px] font-semibold text-slate-500 hover:text-slate-800 px-2 py-0.5 rounded bg-slate-100">닫기</button>' +
+          ['15m:15분봉', '1h:1시간봉', '1d:일봉']
+            .map(spec => {
+              const [tfCode, tfLbl] = spec.split(':');
+              const active = state.futChartTf === tfCode;
+              return (
+                '<button type="button" data-fut-tf="' + tfCode + '" class="px-2 py-0.5 rounded-md text-[11px] font-bold transition ' +
+                (active
+                  ? 'bg-teal-600 text-white'
+                  : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700') +
+                '">' + tfLbl + '</button>'
+              );
+            })
+            .join('') +
+          '<button id="fut-chart-close" type="button" class="ml-1 text-[11px] font-semibold text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-white px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800">닫기</button>' +
           '</div>' +
           '</div>' +
-          '<div id="fut-chart-status" class="text-[11px] text-slate-400 mb-1 hidden"></div>' +
-          '<div class="relative h-48"><canvas id="futMiniChart"></canvas></div>' +
+          '<div id="fut-chart-status" class="text-[11px] text-teal-600 dark:text-teal-400 mb-1 hidden"></div>' +
+          '<div id="fut-chart-wrap" class="relative h-48 overflow-hidden"><canvas id="futMiniChart"></canvas></div>' +
           '</div>'
         : '');
   } else {
     html +=
-      '<p class="text-xs text-slate-500 leading-relaxed">GitHub Actions의 <strong>Update Index Data</strong> 워크플로우가 실행되면 나스닥100·S&amp;P500 선물, WTI 유가, 금 시세가 자동으로 채워집니다.</p>';
+      '<p class="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">상단 <strong>실시간 조회</strong>를 누르거나 GitHub Actions가 실행되면 국내·해외 선물 시세가 채워집니다.</p>';
   }
   html += '</section>';
+  return html;
+}
 
+function renderNewsCard(f) {
+  const news = state.marketsData.NEWS;
   const hasNews = news && Array.isArray(news.items) && news.items.length > 0;
   const score = hasNews && Number.isFinite(news.sentiment) ? news.sentiment : 0;
   const toneClass =
     score >= 15
-      ? 'bg-red-50 text-red-700'
+      ? 'bg-red-50 dark:bg-rose-500/15 text-red-700 dark:text-rose-300 border border-red-200/70 dark:border-rose-500/30'
       : score <= -15
-        ? 'bg-blue-50 text-blue-700'
-        : 'bg-slate-100 text-slate-700';
+        ? 'bg-blue-50 dark:bg-sky-500/15 text-blue-700 dark:text-sky-300 border border-blue-200/70 dark:border-sky-500/30'
+        : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700';
   const toneLabel = !hasNews ? '수집 대기' : score >= 15 ? '우호적' : score <= -15 ? '경계·부정' : '중립';
   const impactNote =
     f && f.newsApplied
@@ -272,32 +454,28 @@ function renderFuturesAndNewsSection(f) {
         ? '뉴스 수집 시 확률에 자동 보정(최대 ±4.5%p)'
         : '뉴스 보정 꺼짐 (순수 가격 모델)';
 
-  html +=
-    '<section class="mt-3 rounded-2xl bg-white border border-slate-200 p-4 shadow-sm">' +
+  let html =
+    '<section class="rounded-2xl surface-card p-4 shadow-sm' + boardCls(3) + '">' +
     '<div class="flex items-center justify-between gap-2 mb-2 flex-wrap">' +
     '<div class="flex items-center gap-2">' +
-    '<h2 class="text-sm font-bold text-slate-900">글로벌 주요 경제 뉴스</h2>' +
-    '<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold tabular-nums ' +
-    toneClass +
-    '">' +
+    '<h2 class="text-sm font-bold text-slate-900 dark:text-slate-100">실시간 증시 · 경제 속보</h2>' +
+    '<span class="px-2 py-0.5 rounded-full text-[11px] font-bold tabular-nums ' + toneClass + '">' +
     (hasNews ? '심리 ' + toneLabel + ' (' + (score > 0 ? '+' : '') + score + ')' : toneLabel) +
     '</span>' +
     '</div>' +
-    '<button id="toggle-news-overlay" type="button" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold transition ' +
+    '<button id="toggle-news-overlay" type="button" class="px-2.5 py-1 rounded-lg text-[11px] font-bold transition ' +
     (state.useNewsOverlay
-      ? 'bg-teal-700 text-white'
-      : 'bg-slate-100 text-slate-600 hover:bg-slate-200') +
+      ? 'bg-teal-600 text-white shadow-sm'
+      : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700') +
     '">투심 반영 ' +
     (state.useNewsOverlay ? 'ON' : 'OFF') +
     '</button>' +
     '</div>' +
-    '<div class="text-[11px] text-slate-500 mb-2">' +
-    impactNote +
-    '</div>';
+    '<div class="text-[11px] text-slate-500 dark:text-slate-400 mb-2">' + impactNote + '</div>';
 
   if (hasNews) {
     html +=
-      '<ul class="divide-y divide-slate-100 text-xs">' +
+      '<ul class="divide-y divide-slate-100 dark:divide-slate-800/90 text-xs">' +
       news.items
         .slice(0, state.newsExpanded ? news.items.length : 3)
         .map(item => {
@@ -305,23 +483,19 @@ function renderFuturesAndNewsSection(f) {
           const titleHtml = safeUrl
             ? '<a href="' +
               escapeHtml(safeUrl) +
-              '" target="_blank" rel="noopener noreferrer" class="font-medium text-slate-800 hover:text-teal-700 underline-offset-2 hover:underline">' +
+              '" target="_blank" rel="noopener noreferrer" class="font-medium text-slate-800 dark:text-slate-100 hover:text-teal-600 dark:hover:text-teal-300 underline-offset-2 hover:underline">' +
               escapeHtml(item.title) +
               '</a>'
-            : '<span class="font-medium text-slate-800">' + escapeHtml(item.title) + '</span>';
-          const transBadge = item.translated
-            ? '<span class="ml-1.5 inline-block px-1.5 py-0.2 rounded bg-teal-50 text-teal-700 text-[10px] font-semibold align-middle">한글번역</span>'
-            : '';
+            : '<span class="font-medium text-slate-800 dark:text-slate-100">' + escapeHtml(item.title) + '</span>';
           const summaryHtml = item.summary
-            ? '<div class="text-[11px] text-slate-500 mt-0.5 leading-snug">' + escapeHtml(item.summary) + '</div>'
+            ? '<div class="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-snug">' + escapeHtml(item.summary) + '</div>'
             : '';
           return (
             '<li class="py-2.5 flex items-start justify-between gap-2">' +
             '<div class="leading-snug">' +
             titleHtml +
-            transBadge +
             summaryHtml +
-            (item.source ? '<div class="text-[10px] text-slate-400 mt-0.5">' + escapeHtml(item.source) + '</div>' : '') +
+            (item.source ? '<div class="text-[10px] text-slate-400 dark:text-slate-500 mt-0.5">' + escapeHtml(item.source) + '</div>' : '') +
             '</div>' +
             '</li>'
           );
@@ -329,13 +503,13 @@ function renderFuturesAndNewsSection(f) {
         .join('') +
       '</ul>' +
       (news.items.length > 3
-        ? '<button id="toggle-news-expand" type="button" class="mt-2 w-full py-2 rounded-xl bg-slate-50 hover:bg-slate-100 border border-slate-200 text-xs font-semibold text-slate-700 transition">' +
+        ? '<button id="toggle-news-expand" type="button" class="mt-2.5 w-full py-2 rounded-xl surface-inset hover:border-teal-500/50 text-xs font-semibold text-slate-700 dark:text-slate-200 transition">' +
           (state.newsExpanded ? '뉴스 접기 (3건만 보기) ▴' : '최신 뉴스 전체보기 (총 ' + news.items.length + '건) ▾') +
           '</button>'
         : '');
   } else {
     html +=
-      '<p class="text-xs text-slate-500 leading-relaxed">아직 수집된 뉴스가 없습니다. GitHub Actions에서 <strong>Update Index Data</strong>를 실행하면 최신 헤드라인 5건과 심리 점수가 표시되며, 시뮬레이터 탭에서 뉴스 심리(-100~+100)를 직접 조정해 볼 수도 있습니다.</p>';
+      '<p class="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">아직 수집된 뉴스가 없습니다. 상단 <strong>실시간 조회</strong>를 누르면 국내 증시·경제 속보가 표시됩니다.</p>';
   }
   html += '</section>';
   return html;
@@ -350,37 +524,53 @@ function renderForecast() {
 
   if (!f || !r) {
     container.innerHTML =
-      '<div class="bg-white rounded-2xl border border-slate-200 p-6 text-center text-slate-600">유효한 예측을 계산할 수 있는 과거 표본이 부족합니다 (최소 18거래일 필요).</div>';
+      '<div class="surface-card rounded-2xl p-6 text-center text-slate-600 dark:text-slate-400">유효한 예측을 계산할 수 있는 과거 표본이 부족합니다 (최소 18거래일 필요).</div>';
     return;
   }
 
   const horizonLabel = state.horizon === 5 ? '향후 5거래일(1주) 상승 확률' : '다음 거래일 상승 확률';
+  const isBull = f.p >= 0.5;
+
+  // 상태별 히어로 글로우 그라데이션
+  const heroGlow =
+    f.signal.tone === 'teal'
+      ? 'radial-gradient(circle at 18% 0%, rgba(251, 113, 133, 0.24), transparent 58%)'
+      : f.signal.tone === 'rose'
+        ? 'radial-gradient(circle at 18% 0%, rgba(56, 189, 248, 0.24), transparent 58%)'
+        : 'radial-gradient(circle at 18% 0%, rgba(45, 212, 191, 0.18), transparent 58%)';
 
   const sigBadgeClass =
     f.signal.tone === 'teal'
-      ? 'bg-red-500/25 text-red-200 border border-red-400/40'
+      ? 'bg-rose-500/20 text-rose-200 border border-rose-400/40'
       : f.signal.tone === 'rose'
-        ? 'bg-blue-500/25 text-sky-200 border border-sky-400/40'
-        : 'bg-slate-800 text-slate-300 border border-slate-700';
+        ? 'bg-sky-500/20 text-sky-200 border border-sky-400/40'
+        : 'bg-slate-800/90 text-slate-300 border border-slate-700';
 
   const regimeBadgeClass =
     f.regimeTone === 'rose'
-      ? 'bg-rose-500/20 text-rose-200'
+      ? 'bg-rose-500/20 text-rose-200 border border-rose-500/25'
       : f.regimeTone === 'teal'
-        ? 'bg-emerald-500/20 text-emerald-200'
-        : 'bg-slate-800 text-slate-300';
+        ? 'bg-emerald-500/20 text-emerald-200 border border-emerald-500/25'
+        : 'bg-slate-800 text-slate-300 border border-slate-700';
+
+  // 시나리오 범위 바 (0% 중심 기준 좌/우 폭 계산)
+  const maxAbs = Math.max(Math.abs(f.low), Math.abs(f.high), 1.5);
+  const leftBarPct = Math.min(50, (Math.max(0, -f.low) / maxAbs) * 46);
+  const rightBarPct = Math.min(50, (Math.max(0, f.high) / maxAbs) * 46);
+  const loPt = Math.round(r[1] * (1 + f.low / 100));
+  const hiPt = Math.round(r[1] * (1 + f.high / 100));
 
   const extraSection = f.candidates.length
-    ? '<section class="mt-3 rounded-2xl bg-white border border-slate-200 p-4 shadow-sm">' +
+    ? '<section class="rounded-2xl surface-card p-4 shadow-sm' + boardCls(5) + '">' +
       '<div class="flex items-center justify-between mb-1.5">' +
-      '<h2 class="text-sm font-bold text-slate-900">확장 지표 상태</h2>' +
-      '<span class="text-xs text-slate-500">' +
+      '<h2 class="text-sm font-bold text-slate-900 dark:text-slate-100">확장 지표 상태</h2>' +
+      '<span class="text-xs text-slate-500 dark:text-slate-400">' +
       (state.key === 'NASDAQ' && f.krLeadDate
         ? '한국장 선행 ' + f.krLeadDate + ' 반영'
         : '미국장 ' + (f.usDate || '미수록') + (f.usSessions > 1 ? ' (' + f.usSessions + '일 누적)' : '')) +
       '</span>' +
       '</div>' +
-      '<div class="divide-y divide-slate-100">' +
+      '<div class="divide-y divide-slate-100 dark:divide-slate-800/90">' +
       f.candidates
         .map(k => {
           let val = f.extra[k];
@@ -398,19 +588,17 @@ function renderForecast() {
           const hasVal = Number.isFinite(val);
           const isActive = f.active.includes(k);
           const badge = isActive
-            ? '<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-teal-50 text-teal-800">모델 반영</span>'
+            ? '<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-teal-50 dark:bg-teal-500/15 text-teal-800 dark:text-teal-300">모델 반영</span>'
             : isLiveOverlayVal
-              ? '<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-50 text-indigo-700">실시간 보정</span>'
+              ? '<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-50 dark:bg-indigo-500/20 text-indigo-700 dark:text-indigo-300">실시간 보정</span>'
               : hasVal
-                ? '<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-amber-50 text-amber-800">표본 대기</span>'
-                : '<span class="px-2 py-0.5 rounded-full text-[11px] font-medium bg-slate-100 text-slate-500">갱신 대기</span>';
+                ? '<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-amber-50 dark:bg-amber-500/15 text-amber-800 dark:text-amber-300">표본 대기</span>'
+                : '<span class="px-2 py-0.5 rounded-full text-[11px] font-medium bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400">갱신 대기</span>';
           return (
             '<div class="py-2 flex items-center justify-between gap-2 text-xs">' +
-            '<span class="font-medium text-slate-700">' +
-            EXTRA_META[k].label +
-            '</span>' +
+            '<span class="font-medium text-slate-700 dark:text-slate-300">' + EXTRA_META[k].label + '</span>' +
             '<div class="flex items-center gap-2 tabular-nums">' +
-            '<span class="font-semibold text-slate-900">' +
+            '<span class="font-semibold text-slate-900 dark:text-slate-100">' +
             (hasVal ? val.toFixed(2) + EXTRA_META[k].unit : '-') +
             '</span>' +
             badge +
@@ -428,25 +616,25 @@ function renderForecast() {
       const pos = c.impactPct >= 0;
       const barW = Math.min(100, Math.abs(c.impactPct) * 8);
       return (
-        '<div class="py-2 border-b border-slate-100 last:border-b-0">' +
+        '<div class="py-2 border-b border-slate-100 dark:border-slate-800/90 last:border-b-0">' +
         '<div class="flex items-center justify-between text-xs mb-1">' +
-        '<span class="font-medium text-slate-700">' +
+        '<span class="font-medium text-slate-700 dark:text-slate-300">' +
         c.label +
-        ' <span class="text-slate-400 font-normal">(' +
+        ' <span class="text-slate-400 dark:text-slate-500 font-normal">(' +
         (c.value > 0 && c.key !== 'vol10' && c.key !== 'vix' && c.key !== 'breadth' ? '+' : '') +
         c.value.toFixed(2) +
         c.unit +
         ')</span></span>' +
-        '<span class="font-semibold tabular-nums ' +
-        (pos ? 'text-red-600' : 'text-blue-600') +
+        '<span class="font-bold tabular-nums ' +
+        (pos ? 'text-red-600 dark:text-rose-400' : 'text-blue-600 dark:text-sky-400') +
         '">' +
         (pos ? '+' : '') +
         c.impactPct.toFixed(2) +
         '%p</span>' +
         '</div>' +
-        '<div class="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">' +
+        '<div class="h-1.5 w-full bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden">' +
         '<div class="h-full rounded-full ' +
-        (pos ? 'bg-red-500' : 'bg-blue-500') +
+        (pos ? 'bg-red-500 dark:bg-rose-400' : 'bg-blue-500 dark:bg-sky-400') +
         '" style="width:' +
         Math.max(4, barW).toFixed(1) +
         '%"></div>' +
@@ -459,136 +647,161 @@ function renderForecast() {
   const fwdActual = forwardReturn(rows, i, state.horizon);
   const nextActual =
     fwdActual !== null
-      ? '<span class="font-semibold ' +
-        (fwdActual >= 0 ? 'text-red-600' : 'text-blue-600') +
+      ? '<span class="font-bold ' +
+        (fwdActual >= 0 ? 'text-red-600 dark:text-rose-400' : 'text-blue-600 dark:text-sky-400') +
         '">' +
         fmtMove(fwdActual) +
         '</span> (' +
         rows[i + state.horizon][0] +
         ')'
-      : '<span class="text-slate-500">마감 전</span>';
+      : '<span class="text-slate-500 dark:text-slate-400">마감 전</span>';
 
-  container.innerHTML =
-    '<section class="rounded-2xl bg-slate-900 text-white p-5 shadow-sm">' +
+  const heroCard =
+    '<section class="rounded-2xl bg-slate-900 dark:bg-[#0d1629] text-white p-5 border border-slate-800 dark:border-slate-700/70 shadow-lg relative overflow-hidden' +
+    boardCls(1) +
+    '" style="background-image:' + heroGlow + '">' +
     '<div class="flex items-center justify-between gap-2 flex-wrap">' +
-    '<span class="text-xs font-medium text-slate-300">' +
+    '<span class="text-xs font-semibold text-slate-300">' +
     MARKET_NAMES[state.key] +
     ' ' +
     horizonLabel +
-    ' (v5.9)</span>' +
-    '<div class="flex items-center gap-1.5">' +
-    (state.isLiveIntraday ? '<span class="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/25 text-amber-200 border border-amber-400/40 font-semibold">장중 실시간 잠정</span>' : '') +
-    '<span class="text-[11px] px-2 py-0.5 rounded-full ' +
-    regimeBadgeClass +
-    '">' +
-    f.regime +
     '</span>' +
-    '<span class="text-[11px] px-2 py-0.5 rounded-full bg-slate-800 text-teal-300 tabular-nums">표본 ' +
+    '<div class="flex items-center gap-1.5 flex-wrap">' +
+    (state.isLiveIntraday
+      ? '<span class="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-200 border border-amber-400/40 font-semibold">장중 잠정</span>'
+      : '') +
+    '<span class="text-[11px] px-2 py-0.5 rounded-full ' + regimeBadgeClass + '">' + f.regime + '</span>' +
+    '<span class="text-[11px] px-2 py-0.5 rounded-full bg-slate-800/90 text-teal-300 border border-slate-700 tabular-nums">표본 ' +
     f.n +
     '일</span>' +
     '</div>' +
     '</div>' +
-    '<div class="mt-2.5 flex items-center justify-between gap-3">' +
-    '<div class="text-4xl sm:text-5xl font-bold tracking-tight tabular-nums ' + (f.p >= 0.5 ? 'text-rose-400' : 'text-sky-400') + '">' +
+    '<div class="mt-3 flex items-center justify-between gap-3">' +
+    '<div class="text-4xl sm:text-5xl font-extrabold tracking-tight tabular-nums ' +
+    (isBull ? 'text-rose-400' : 'text-sky-400') +
+    '"' +
+    (state.animateBoard
+      ? ' data-countup="1" data-target="' + (f.p * 100).toFixed(1) + '" data-decimals="1" data-suffix="%"'
+      : '') +
+    '>' +
     fmtPct(f.p) +
     '</div>' +
     '<div class="text-right">' +
-    '<span class="inline-block text-xs font-bold px-2.5 py-1 rounded-full ' +
-    sigBadgeClass +
-    '">' +
+    '<span class="inline-block text-xs font-bold px-2.5 py-1 rounded-full ' + sigBadgeClass + '">' +
     f.signal.label +
     '</span>' +
-    '<div class="text-xs text-slate-400 mt-1 tabular-nums">종합 점수 <strong class="text-white">' +
+    '<div class="text-xs text-slate-400 mt-1.5 tabular-nums">종합 점수 <strong class="text-white"' +
+    (state.animateBoard ? ' data-countup="1" data-target="' + f.score + '" data-decimals="0"' : '') +
+    '>' +
     f.score +
     '</strong> / 100</div>' +
     '</div>' +
     '</div>' +
-    '<div class="mt-3 h-2.5 w-full bg-slate-700 rounded-full overflow-hidden">' +
-    '<div class="h-full rounded-full transition-all ' + (f.p >= 0.5 ? 'bg-rose-400' : 'bg-sky-400') + '" style="width:' +
-    (f.p * 100).toFixed(1) +
-    '%"></div>' +
+    '<div class="mt-4 relative h-2.5 w-full bg-slate-800 rounded-full overflow-hidden">' +
+    '<div class="absolute left-1/2 top-0 bottom-0 w-px bg-slate-500/60 z-10"></div>' +
+    '<div class="h-full rounded-full transition-all duration-700 ease-out ' +
+    (isBull ? 'bg-gradient-to-r from-rose-500 to-rose-300' : 'bg-gradient-to-r from-blue-600 to-sky-400') +
+    '" data-gauge-target="' + (f.p * 100).toFixed(1) + '%" style="width:' + (f.p * 100).toFixed(1) + '%"></div>' +
     '</div>' +
     '<div class="mt-2.5 flex items-center justify-between text-xs text-slate-300 tabular-nums">' +
-    '<span>상승 ' +
-    fmtPct(f.p) +
-    ' · 하락·보합 ' +
-    fmtPct(f.down) +
-    '</span>' +
-    '<span>과거 기준 빈도 ' +
-    fmtPct(f.base) +
-    '</span>' +
+    '<span>상승 <strong class="text-rose-300">' + fmtPct(f.p) + '</strong> · 하락·보합 <strong class="text-sky-300">' + fmtPct(f.down) + '</strong></span>' +
+    '<span class="text-slate-400">기준 빈도 ' + fmtPct(f.base) + '</span>' +
     '</div>' +
-    '</section>' +
-    renderFuturesAndNewsSection(f) +
-    '<section class="mt-3 rounded-2xl bg-white border border-slate-200 p-4 shadow-sm">' +
-    '<div class="flex items-center justify-between mb-2">' +
-    '<h2 class="text-sm font-bold text-slate-900">' +
+    '</section>';
+
+  const bandCard =
+    '<section class="rounded-2xl surface-card p-4 shadow-sm' + boardCls(4) + '">' +
+    '<div class="flex items-center justify-between mb-2.5">' +
+    '<h2 class="text-sm font-bold text-slate-900 dark:text-slate-100">' +
     (state.horizon === 5 ? '향후 5거래일 예상 등락 폭 (80% 구간)' : '다음 거래일 예상 등락 폭 (80% 구간)') +
     '</h2>' +
-    '<span class="text-xs text-slate-500 tabular-nums">10일 변동성 ' +
-    f.vol.toFixed(2) +
-    '%</span>' +
+    '<span class="text-xs text-slate-500 dark:text-slate-400 tabular-nums">10일 변동성 ' + f.vol.toFixed(2) + '%</span>' +
     '</div>' +
-    '<div class="rounded-xl bg-slate-50 border border-slate-200 px-3.5 py-3 flex items-center justify-between">' +
-    '<span class="text-xs font-medium text-slate-600">예상 시나리오 밴드 (P10 ~ P90)</span>' +
-    '<span class="text-base font-bold text-slate-900 tabular-nums">' +
-    fmtMove(f.low) +
-    ' ~ ' +
-    fmtMove(f.high) +
+    '<div class="rounded-xl surface-inset px-3.5 py-3">' +
+    '<div class="flex items-center justify-between gap-2">' +
+    '<span class="text-xs font-medium text-slate-600 dark:text-slate-300">시나리오 밴드 (P10 ~ P90)</span>' +
+    '<span class="text-sm font-extrabold text-slate-900 dark:text-white tabular-nums">' +
+    '<span class="text-blue-600 dark:text-sky-400">' + fmtMove(f.low) + '</span>' +
+    ' <span class="text-slate-400 font-normal">~</span> ' +
+    '<span class="text-red-600 dark:text-rose-400">' + fmtMove(f.high) + '</span>' +
     '</span>' +
+    '</div>' +
+    '<div class="mt-2.5 relative h-3 rounded-full bg-slate-200/80 dark:bg-slate-800 overflow-hidden">' +
+    '<div class="absolute top-0 bottom-0 bg-gradient-to-l from-sky-500 to-blue-600/80 rounded-l-full bar-grow-left" style="right:50%;width:' +
+    leftBarPct.toFixed(1) + '%"></div>' +
+    '<div class="absolute top-0 bottom-0 bg-gradient-to-r from-rose-500 to-red-500/80 rounded-r-full bar-grow-right" style="left:50%;width:' +
+    rightBarPct.toFixed(1) + '%"></div>' +
+    '<div class="absolute left-1/2 top-0 bottom-0 w-0.5 bg-slate-700 dark:bg-slate-200 -translate-x-1/2"></div>' +
+    '</div>' +
+    '<div class="mt-1.5 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">' +
+    '<span>하단 약 <strong class="text-blue-600 dark:text-sky-300">' + loPt.toLocaleString('ko-KR') + ' pt</strong></span>' +
+    '<span class="text-[10px]">0% 기준</span>' +
+    '<span>상단 약 <strong class="text-red-600 dark:text-rose-300">' + hiPt.toLocaleString('ko-KR') + ' pt</strong></span>' +
+    '</div>' +
     '</div>' +
     '<div class="mt-2.5 grid grid-cols-2 gap-2.5">' +
-    '<div class="rounded-xl bg-red-50/70 px-3 py-2.5">' +
-    '<div class="text-xs text-red-700">상승 시 중앙값</div>' +
-    '<div class="text-base font-bold text-red-800 tabular-nums mt-0.5">' +
-    fmtMove(f.gain) +
+    '<div class="rounded-xl bg-red-50/80 dark:bg-rose-500/10 border border-red-100 dark:border-rose-500/20 px-3 py-2.5">' +
+    '<div class="text-[11px] text-red-700 dark:text-rose-300 font-medium">상승 시 중앙값</div>' +
+    '<div class="text-base font-extrabold text-red-700 dark:text-rose-400 tabular-nums mt-0.5">' + fmtMove(f.gain) + '</div>' +
+    '</div>' +
+    '<div class="rounded-xl bg-blue-50/80 dark:bg-sky-500/10 border border-blue-100 dark:border-sky-500/20 px-3 py-2.5">' +
+    '<div class="text-[11px] text-blue-700 dark:text-sky-300 font-medium">하락 시 중앙값</div>' +
+    '<div class="text-base font-extrabold text-blue-700 dark:text-sky-400 tabular-nums mt-0.5">' + fmtMove(f.loss) + '</div>' +
     '</div>' +
     '</div>' +
-    '<div class="rounded-xl bg-blue-50/70 px-3 py-2.5">' +
-    '<div class="text-xs text-blue-700">하락 시 중앙값</div>' +
-    '<div class="text-base font-bold text-blue-800 tabular-nums mt-0.5">' +
-    fmtMove(f.loss) +
+    '<div class="mt-2.5 flex items-center justify-between text-xs text-slate-600 dark:text-slate-400 pt-2 border-t border-slate-100 dark:border-slate-800/90">' +
+    '<span>기준 종가 (' + r[0] + '): <strong class="text-slate-900 dark:text-slate-100 tabular-nums">' +
+    r[1].toLocaleString('ko-KR') + ' pt</strong> (' + fmtMove(r[2]) + ')</span>' +
+    '<span>실제: ' + nextActual + '</span>' +
     '</div>' +
-    '</div>' +
-    '</div>' +
-    '<div class="mt-2.5 flex items-center justify-between text-xs text-slate-600 pt-2 border-t border-slate-100">' +
-    '<span>기준 종가 (' +
-    r[0] +
-    '): <strong class="text-slate-900 tabular-nums">' +
-    r[1].toLocaleString('ko-KR') +
-    ' pt</strong> (' +
-    fmtMove(r[2]) +
-    ')</span>' +
-    '<span>실제: ' +
-    nextActual +
-    '</span>' +
-    '</div>' +
-    '</section>' +
-    extraSection +
-    '<section class="mt-3 rounded-2xl bg-white border border-slate-200 p-4 shadow-sm">' +
+    '</section>';
+
+  const priceChartCard =
+    '<section class="rounded-2xl surface-card p-4 shadow-sm' + boardCls(5) + '">' +
     '<div class="flex items-center justify-between mb-2">' +
-    '<h2 class="text-sm font-bold text-slate-900">최근 30거래일 종가 추이 및 예상 밴드</h2>' +
-    '<span class="text-xs text-slate-500">' +
+    '<h2 class="text-sm font-bold text-slate-900 dark:text-slate-100">최근 30거래일 종가 추이 및 예상 밴드</h2>' +
+    '<span class="text-xs text-slate-500 dark:text-slate-400">' +
     (state.horizon === 5 ? '+5거래일 P10~P90' : '+1거래일 P10~P90') +
     '</span>' +
     '</div>' +
-    '<div class="relative h-56"><canvas id="priceChart"></canvas></div>' +
-    '</section>' +
-    '<section class="mt-3 rounded-2xl bg-white border border-slate-200 p-4 shadow-sm">' +
-    '<div class="flex items-center justify-between mb-1.5">' +
-    '<h2 class="text-sm font-bold text-slate-900">변수별 확률 기여도 분해</h2>' +
-    '<span class="text-xs text-slate-500">시간감쇠 정규화 기준</span>' +
-    '</div>' +
-    '<div>' +
-    contribRows +
-    '</div>' +
+    '<div id="price-chart-wrap" class="relative h-56 overflow-hidden"><canvas id="priceChart"></canvas></div>' +
     '</section>';
+
+  const contribCard =
+    '<section class="rounded-2xl surface-card p-4 shadow-sm' + boardCls(6) + '">' +
+    '<div class="flex items-center justify-between mb-1.5">' +
+    '<h2 class="text-sm font-bold text-slate-900 dark:text-slate-100">변수별 확률 기여도 분해</h2>' +
+    '<span class="text-xs text-slate-500 dark:text-slate-400">시간감쇠 정규화 기준</span>' +
+    '</div>' +
+    '<div>' + contribRows + '</div>' +
+    '</section>';
+
+  // Z 폴드 펼친 화면 / 태블릿 / 데스크톱 2단 대시보드 + 모바일 1단 자동 전환
+  container.innerHTML =
+    '<div class="lg:grid lg:grid-cols-12 lg:gap-4 lg:items-start">' +
+    '<div class="lg:col-span-6 space-y-3">' +
+    heroCard +
+    bandCard +
+    priceChartCard +
+    contribCard +
+    '</div>' +
+    '<div class="lg:col-span-6 space-y-3 mt-3 lg:mt-0">' +
+    renderFuturesCard(f) +
+    renderNewsCard(f) +
+    extraSection +
+    '</div>' +
+    '</div>';
+
+  if (state.animateBoard) {
+    runCountUps(container);
+    state.animateBoard = false;
+  }
 
   const toggleKrBtn = document.getElementById('toggle-krfut-overlay');
   if (toggleKrBtn) {
     toggleKrBtn.addEventListener('click', () => {
       state.useKrFutOverlay = !state.useKrFutOverlay;
-      recomputeMarket(state.key, true);
+      recomputeMarket(state.key, true, false);
       showToast(state.useKrFutOverlay ? '코스피200 국내선물 보정을 켰습니다.' : '국내선물 보정을 껐습니다.');
     });
   }
@@ -596,20 +809,22 @@ function renderForecast() {
   if (toggleBtn) {
     toggleBtn.addEventListener('click', () => {
       state.useNewsOverlay = !state.useNewsOverlay;
-      recomputeMarket(state.key, true);
-      showToast(state.useNewsOverlay ? '글로벌 뉴스 투심 보정을 켰습니다.' : '순수 가격 모델 확률로 전환했습니다.');
+      recomputeMarket(state.key, true, false);
+      showToast(state.useNewsOverlay ? '뉴스 투심 보정을 켰습니다.' : '순수 가격 모델 확률로 전환했습니다.');
     });
   }
   for (const btn of document.querySelectorAll('button[data-fut-key]')) {
     btn.addEventListener('click', () => {
       const k = btn.dataset.futKey;
       state.selectedFutChart = state.selectedFutChart === k ? null : k;
+      state.animateBoard = false;
       renderForecast();
     });
   }
   for (const tfBtn of document.querySelectorAll('button[data-fut-tf]')) {
     tfBtn.addEventListener('click', () => {
       state.futChartTf = tfBtn.dataset.futTf;
+      state.animateBoard = false;
       renderForecast();
     });
   }
@@ -617,6 +832,7 @@ function renderForecast() {
   if (closeFutBtn) {
     closeFutBtn.addEventListener('click', () => {
       state.selectedFutChart = null;
+      state.animateBoard = false;
       renderForecast();
     });
   }
@@ -624,14 +840,13 @@ function renderForecast() {
   if (expandNewsBtn) {
     expandNewsBtn.addEventListener('click', () => {
       state.newsExpanded = !state.newsExpanded;
+      state.animateBoard = false;
       renderForecast();
     });
   }
   renderFuturesChart();
   renderPriceChart();
 }
-
-
 
 async function renderFuturesChart() {
   const key = state.selectedFutChart;
@@ -678,7 +893,6 @@ async function renderFuturesChart() {
     if (statusEl) statusEl.classList.add('hidden');
   }
 
-  // 폴백: Worker 미연결이거나 분봉 휴장일 때 일봉 시계열 표시
   if (!points.length) {
     const fut = state.marketsData.FUTURES || {};
     let series = fut.series && Array.isArray(fut.series[key]) ? fut.series[key] : [];
@@ -691,16 +905,20 @@ async function renderFuturesChart() {
     points = series.map(p => [p[0], p[1], p[1], p[1]]);
   }
 
-  // 사용자가 그사이 다른 차트로 바꿨으면 중단
   if (state.selectedFutChart !== key || state.futChartTf !== tf || !points.length) return;
   const freshCanvas = document.getElementById('futMiniChart');
   if (!freshCanvas) return;
 
+  const dark = isDark();
   const labels = points.map(p => p[0]);
   const vals = points.map(p => p[1]);
   const isUp = vals[vals.length - 1] >= vals[0];
-  const stroke = isUp ? '#dc2626' : '#2563eb';
-  const fillBg = isUp ? 'rgba(220, 38, 38, 0.08)' : 'rgba(37, 99, 235, 0.08)';
+  const stroke = isUp ? (dark ? '#fb7185' : '#dc2626') : (dark ? '#60a5fa' : '#2563eb');
+  const fillBg = isUp
+    ? dark ? 'rgba(251, 113, 133, 0.14)' : 'rgba(220, 38, 38, 0.08)'
+    : dark ? 'rgba(96, 165, 250, 0.14)' : 'rgba(37, 99, 235, 0.08)';
+  const tickColor = dark ? '#94a3b8' : '#64748b';
+  const gridColor = dark ? 'rgba(148, 163, 184, 0.12)' : '#f1f5f9';
 
   state.futChartInstance = new Chart(freshCanvas, {
     type: 'line',
@@ -726,6 +944,9 @@ async function renderFuturesChart() {
       plugins: {
         legend: { display: false },
         tooltip: {
+          backgroundColor: dark ? '#0f172a' : '#1e293b',
+          borderColor: dark ? 'rgba(148,163,184,0.25)' : 'transparent',
+          borderWidth: dark ? 1 : 0,
           callbacks: {
             label: ctx => {
               const p = points[ctx.dataIndex];
@@ -738,11 +959,12 @@ async function renderFuturesChart() {
         }
       },
       scales: {
-        x: { ticks: { maxTicksLimit: 5, font: { size: 10 } }, grid: { display: false } },
-        y: { ticks: { font: { size: 10 } }, grid: { color: '#f1f5f9' } }
+        x: { ticks: { maxTicksLimit: 5, font: { size: 10 }, color: tickColor }, grid: { display: false } },
+        y: { ticks: { font: { size: 10 }, color: tickColor }, grid: { color: gridColor } }
       }
     }
   });
+  triggerChartReveal('fut-chart-wrap');
 }
 
 function renderPriceChart() {
@@ -758,6 +980,7 @@ function renderPriceChart() {
     state.chartInstance = null;
   }
 
+  const dark = isDark();
   const slice = rows.slice(Math.max(0, i - 29), i + 1);
   const labels = slice.map(v => v[0].slice(5));
   labels.push(state.horizon === 5 ? '+5일(예상)' : '다음날(예상)');
@@ -773,6 +996,9 @@ function renderPriceChart() {
   const closeLine = closeData.concat([null]);
   const projLine = new Array(slice.length - 1).fill(null).concat([lastClose, midPt]);
 
+  const tickColor = dark ? '#94a3b8' : '#64748b';
+  const gridColor = dark ? 'rgba(148, 163, 184, 0.12)' : '#f1f5f9';
+
   state.chartInstance = new Chart(canvas, {
     type: 'line',
     data: {
@@ -781,8 +1007,8 @@ function renderPriceChart() {
         {
           label: '종가 (pt)',
           data: closeLine,
-          borderColor: '#0f766e',
-          backgroundColor: 'rgba(15, 118, 110, 0.08)',
+          borderColor: dark ? '#2dd4bf' : '#0f766e',
+          backgroundColor: dark ? 'rgba(45, 212, 191, 0.12)' : 'rgba(15, 118, 110, 0.08)',
           borderWidth: 2.2,
           pointRadius: 1.5,
           tension: 0.2
@@ -790,7 +1016,7 @@ function renderPriceChart() {
         {
           label: '예상 상단 (P90)',
           data: upperBand,
-          borderColor: '#dc2626',
+          borderColor: dark ? '#fb7185' : '#dc2626',
           borderDash: [4, 4],
           borderWidth: 1.5,
           pointRadius: 3,
@@ -799,17 +1025,17 @@ function renderPriceChart() {
         {
           label: '예상 하단 (P10)',
           data: lowerBand,
-          borderColor: '#2563eb',
+          borderColor: dark ? '#60a5fa' : '#2563eb',
           borderDash: [4, 4],
           borderWidth: 1.5,
           pointRadius: 3,
           fill: '-1',
-          backgroundColor: 'rgba(14, 165, 233, 0.12)'
+          backgroundColor: dark ? 'rgba(56, 189, 248, 0.15)' : 'rgba(14, 165, 233, 0.12)'
         },
         {
           label: '중심 추정',
           data: projLine,
-          borderColor: '#334155',
+          borderColor: dark ? '#cbd5e1' : '#334155',
           borderDash: [2, 2],
           borderWidth: 1.5,
           pointRadius: 3
@@ -824,21 +1050,22 @@ function renderPriceChart() {
         legend: {
           display: true,
           position: 'bottom',
-          labels: { boxWidth: 10, font: { size: 11 } }
+          labels: { boxWidth: 10, font: { size: 11 }, color: tickColor }
         }
       },
       scales: {
         x: {
-          ticks: { maxTicksLimit: 6, font: { size: 11 } },
+          ticks: { maxTicksLimit: 6, font: { size: 11 }, color: tickColor },
           grid: { display: false }
         },
         y: {
-          ticks: { font: { size: 11 } },
-          grid: { color: '#f1f5f9' }
+          ticks: { font: { size: 11 }, color: tickColor },
+          grid: { color: gridColor }
         }
       }
     }
   });
+  triggerChartReveal('price-chart-wrap');
 }
 
 function renderSimulator() {
@@ -846,7 +1073,7 @@ function renderSimulator() {
   const container = document.getElementById('simulator-content');
   if (!f) {
     container.innerHTML =
-      '<div class="bg-white rounded-2xl border border-slate-200 p-6 text-center text-slate-600">시뮬레이션할 기준 모델이 없습니다.</div>';
+      '<div class="surface-card rounded-2xl p-6 text-center text-slate-600 dark:text-slate-400">시뮬레이션할 기준 모델이 없습니다.</div>';
     return;
   }
 
@@ -865,98 +1092,60 @@ function renderSimulator() {
     .map((m, idx) => {
       const val = state.simValues[idx];
       return (
-        '<div class="py-2.5 border-b border-slate-100 last:border-b-0">' +
+        '<div class="py-2.5 border-b border-slate-100 dark:border-slate-800/90 last:border-b-0">' +
         '<div class="flex items-center justify-between text-xs mb-1.5">' +
-        '<label for="sim-' +
-        idx +
-        '" class="font-semibold text-slate-700">' +
-        m.label +
-        '</label>' +
-        '<span id="sim-val-' +
-        idx +
-        '" class="font-bold text-slate-900 tabular-nums">' +
+        '<label for="sim-' + idx + '" class="font-semibold text-slate-700 dark:text-slate-300">' + m.label + '</label>' +
+        '<span id="sim-val-' + idx + '" class="font-bold text-slate-900 dark:text-slate-100 tabular-nums">' +
         (val > 0 && m.key !== 'vol10' && m.key !== 'vix' && m.key !== 'breadth' ? '+' : '') +
         val.toFixed(2) +
         m.unit +
         '</span>' +
         '</div>' +
-        '<input id="sim-' +
-        idx +
-        '" data-idx="' +
-        idx +
-        '" type="range" min="' +
-        m.min +
-        '" max="' +
-        m.max +
-        '" step="' +
-        m.step +
-        '" value="' +
-        val.toFixed(2) +
-        '" class="w-full accent-teal-700 cursor-pointer" />' +
+        '<input id="sim-' + idx + '" data-idx="' + idx + '" type="range" min="' + m.min + '" max="' + m.max + '" step="' + m.step + '" value="' + val.toFixed(2) + '" class="w-full accent-teal-600 dark:accent-teal-400 cursor-pointer" />' +
         '</div>'
       );
     })
     .join('');
 
   container.innerHTML =
-    '<section class="rounded-2xl bg-slate-900 text-white p-5 shadow-sm">' +
+    '<section class="rounded-2xl bg-slate-900 dark:bg-[#0d1629] text-white p-5 border border-slate-800 dark:border-slate-700/70 shadow-lg' + boardCls(1) + '">' +
     '<div class="flex items-center justify-between">' +
     '<span class="text-xs text-slate-300">' +
-    MARKET_NAMES[state.key] +
-    ' (' +
-    (state.horizon === 5 ? '5거래일' : '1거래일') +
-    ') 시뮬레이션</span>' +
-    '<span id="sim-change" class="text-xs font-semibold tabular-nums ' +
+    MARKET_NAMES[state.key] + ' (' + (state.horizon === 5 ? '5거래일' : '1거래일') + ') 시뮬레이션</span>' +
+    '<span id="sim-change" class="text-xs font-bold tabular-nums ' +
     (diffP >= 0 ? 'text-rose-300' : 'text-sky-300') +
-    '">기존 대비 ' +
-    (diffP >= 0 ? '+' : '') +
-    diffP.toFixed(1) +
-    '%p</span>' +
+    '">기존 대비 ' + (diffP >= 0 ? '+' : '') + diffP.toFixed(1) + '%p</span>' +
     '</div>' +
     '<div class="mt-2 flex items-baseline justify-between">' +
-    '<div id="sim-prob" class="text-4xl font-bold text-emerald-300 tabular-nums">' +
-    fmtPct(simOut.p) +
-    '</div>' +
-    '<div id="sim-band" class="text-sm font-semibold text-slate-200 tabular-nums">' +
-    fmtMove(simOut.low) +
-    ' ~ ' +
-    fmtMove(simOut.high) +
-    '</div>' +
+    '<div id="sim-prob" class="text-4xl font-extrabold text-teal-300 tabular-nums">' + fmtPct(simOut.p) + '</div>' +
+    '<div id="sim-band" class="text-sm font-semibold text-slate-200 tabular-nums">' + fmtMove(simOut.low) + ' ~ ' + fmtMove(simOut.high) + '</div>' +
     '</div>' +
     '<p class="mt-2 text-xs text-slate-400">장전 나스닥·환율·유가·변동성을 조정해 확률과 80% 예상 밴드 변화를 즉시 확인합니다.</p>' +
     '</section>' +
-    '<section class="mt-3 rounded-2xl bg-white border border-slate-200 p-4 shadow-sm">' +
+    '<section class="mt-3 rounded-2xl surface-card p-4 shadow-sm' + boardCls(2) + '">' +
     '<div class="flex items-center justify-between mb-2">' +
-    '<h2 class="text-sm font-bold text-slate-900">입력 변수 조정</h2>' +
-    '<button id="sim-reset" type="button" class="text-xs font-semibold text-teal-700 hover:text-teal-900 px-2.5 py-1 rounded-lg bg-teal-50">현재 기준값 복원</button>' +
+    '<h2 class="text-sm font-bold text-slate-900 dark:text-slate-100">입력 변수 조정</h2>' +
+    '<button id="sim-reset" type="button" class="text-xs font-semibold text-teal-700 dark:text-teal-300 hover:text-teal-900 dark:hover:text-teal-200 px-2.5 py-1 rounded-lg bg-teal-50 dark:bg-teal-500/15 border border-teal-200/70 dark:border-teal-500/30">현재 기준값 복원</button>' +
     '</div>' +
     '<div>' +
     slidersHtml +
     (state.key !== 'NASDAQ'
-      ? '<div class="py-2.5 border-t border-slate-100">' +
+      ? '<div class="py-2.5 border-t border-slate-100 dark:border-slate-800/90">' +
         '<div class="flex items-center justify-between text-xs mb-1.5">' +
-        '<label for="sim-krfut" class="font-semibold text-teal-800">코스피200 국내선물 등락 (KIS)</label>' +
-        '<span id="sim-krfut-val" class="font-bold text-teal-900 tabular-nums">' +
-        (state.simKrFut > 0 ? '+' : '') +
-        state.simKrFut.toFixed(2) +
-        '%</span>' +
+        '<label for="sim-krfut" class="font-semibold text-teal-800 dark:text-teal-300">코스피200 국내선물 등락 (KIS)</label>' +
+        '<span id="sim-krfut-val" class="font-bold text-teal-900 dark:text-teal-200 tabular-nums">' +
+        (state.simKrFut > 0 ? '+' : '') + state.simKrFut.toFixed(2) + '%</span>' +
         '</div>' +
-        '<input id="sim-krfut" type="range" min="-6" max="6" step="0.1" value="' +
-        state.simKrFut.toFixed(2) +
-        '" class="w-full accent-teal-700 cursor-pointer" />' +
+        '<input id="sim-krfut" type="range" min="-6" max="6" step="0.1" value="' + state.simKrFut.toFixed(2) + '" class="w-full accent-teal-600 dark:accent-teal-400 cursor-pointer" />' +
         '</div>'
       : '') +
-    '<div class="py-2.5 border-t border-slate-100">' +
+    '<div class="py-2.5 border-t border-slate-100 dark:border-slate-800/90">' +
     '<div class="flex items-center justify-between text-xs mb-1.5">' +
-    '<label for="sim-news" class="font-semibold text-teal-800">글로벌 뉴스 투심 점수 (오버레이)</label>' +
-    '<span id="sim-news-val" class="font-bold text-teal-900 tabular-nums">' +
-    (state.simNews > 0 ? '+' : '') +
-    state.simNews +
-    '점</span>' +
+    '<label for="sim-news" class="font-semibold text-teal-800 dark:text-teal-300">증시 뉴스 투심 점수 (오버레이)</label>' +
+    '<span id="sim-news-val" class="font-bold text-teal-900 dark:text-teal-200 tabular-nums">' +
+    (state.simNews > 0 ? '+' : '') + state.simNews + '점</span>' +
     '</div>' +
-    '<input id="sim-news" type="range" min="-100" max="100" step="5" value="' +
-    state.simNews +
-    '" class="w-full accent-teal-700 cursor-pointer" />' +
+    '<input id="sim-news" type="range" min="-100" max="100" step="5" value="' + state.simNews + '" class="w-full accent-teal-600 dark:accent-teal-400 cursor-pointer" />' +
     '</div>' +
     '</div>' +
     '</section>';
@@ -968,7 +1157,7 @@ function renderSimulator() {
     const dPct = (updated.p - f.p) * 100;
     const chEl = document.getElementById('sim-change');
     chEl.textContent = '기존 대비 ' + (dPct >= 0 ? '+' : '') + dPct.toFixed(1) + '%p';
-    chEl.className = 'text-xs font-semibold tabular-nums ' + (dPct >= 0 ? 'text-rose-300' : 'text-sky-300');
+    chEl.className = 'text-xs font-bold tabular-nums ' + (dPct >= 0 ? 'text-rose-300' : 'text-sky-300');
     document.getElementById('sim-band').textContent = fmtMove(updated.low) + ' ~ ' + fmtMove(updated.high);
   };
 
@@ -1006,6 +1195,7 @@ function renderSimulator() {
     state.simValues = [...f.rawFeats];
     state.simNews = f.newsScore || 0;
     state.simKrFut = f.krFutPct || 0;
+    state.animateBoard = false;
     renderSimulator();
     showToast('선택한 기준일의 실제 변수 값으로 복원했습니다.');
   });
@@ -1045,7 +1235,6 @@ function renderBacktest() {
   const covV2 = avg(pairs, v => Number(v.y >= v.p2.low && v.y <= v.p2.high));
   const covV1 = state.horizon === 1 ? avg(pairs, v => Number(v.y >= v.p1.low && v.y <= v.p1.high)) : null;
 
-  // 시장별 고확신 구간 선별 성적표 (코스피·코스닥 65%/35%, 나스닥 60%/40%, 최소 20일 표본 가드)
   const thr = getConvictionThreshold(state.key);
   const thrHiPct = Math.round(thr * 100);
   const thrLoPct = Math.round((1 - thr) * 100);
@@ -1057,115 +1246,80 @@ function renderBacktest() {
   const fmtB = x => (x === null ? '-' : x.toFixed(4));
 
   container.innerHTML =
-    '<section class="rounded-2xl bg-slate-900 text-white p-4 shadow-sm">' +
+    '<section class="rounded-2xl bg-slate-900 dark:bg-[#0d1629] text-white p-4 border border-slate-800 dark:border-slate-700/70 shadow-lg' + boardCls(1) + '">' +
     '<div class="flex items-center justify-between mb-2">' +
-    '<h2 class="text-sm font-bold text-white">고확신 신호(' +
-    thrHiPct +
-    '%↑ / ' +
-    thrLoPct +
-    '%↓) 선별 성적표</h2>' +
-    '<span class="text-[11px] px-2 py-0.5 rounded-full bg-slate-800 text-emerald-300 tabular-nums">' +
-    hiPairs.length +
-    '회 발생</span>' +
+    '<h2 class="text-sm font-bold text-white">고확신 신호(' + thrHiPct + '%↑ / ' + thrLoPct + '%↓) 선별 성적표</h2>' +
+    '<span class="text-[11px] px-2 py-0.5 rounded-full bg-slate-800 text-teal-300 border border-slate-700 tabular-nums">' + hiPairs.length + '회 발생</span>' +
     '</div>' +
     '<div class="grid grid-cols-2 gap-2.5 tabular-nums">' +
-    '<div class="rounded-xl bg-slate-800/80 p-3">' +
+    '<div class="rounded-xl bg-slate-800/80 border border-slate-700/60 p-3">' +
     '<div class="text-[11px] text-slate-400">고확신 구간 실제 방향 적중률</div>' +
-    '<div class="text-2xl font-bold text-emerald-300 mt-0.5">' +
-    (hasEnoughHi ? fmtPct(hiAcc) : '표본 부족') +
+    '<div class="text-2xl font-extrabold text-teal-300 mt-0.5">' + (hasEnoughHi ? fmtPct(hiAcc) : '표본 부족') + '</div>' +
     '</div>' +
-    '</div>' +
-    '<div class="rounded-xl bg-slate-800/80 p-3">' +
+    '<div class="rounded-xl bg-slate-800/80 border border-slate-700/60 p-3">' +
     '<div class="text-[11px] text-slate-400">고확신 구간 브라이어 점수</div>' +
-    '<div class="text-2xl font-bold text-white mt-0.5">' +
-    (hasEnoughHi ? fmtB(hiBrier) : '관망 권장') +
+    '<div class="text-2xl font-extrabold text-white mt-0.5">' + (hasEnoughHi ? fmtB(hiBrier) : '관망 권장') + '</div>' +
     '</div>' +
     '</div>' +
-    '</div>' +
-    '<p class="mt-2 text-[11px] text-slate-400">방향성이 모호한 ' +
-    thrLoPct +
-    '~' +
-    thrHiPct +
-    '% 관망 구간을 제외하고, 20회 이상 검증된 고확신 신호만 집계합니다.</p>' +
+    '<p class="mt-2 text-[11px] text-slate-400">방향성이 모호한 ' + thrLoPct + '~' + thrHiPct + '% 관망 구간을 제외하고, 20회 이상 검증된 고확신 신호만 집계합니다.</p>' +
     '</section>' +
-    '<section class="mt-3 rounded-2xl bg-white border border-slate-200 p-4 shadow-sm">' +
+    '<section class="mt-3 rounded-2xl surface-card p-4 shadow-sm' + boardCls(2) + '">' +
     '<div class="flex items-center justify-between mb-2">' +
-    '<h2 class="text-sm font-bold text-slate-900">전체 기간 모델 비교 (' +
-    MARKET_NAMES[state.key] +
-    ' · ' +
-    (state.horizon === 5 ? '5거래일' : '1거래일') +
-    ' · ' +
-    pairs.length +
-    '회)</h2>' +
+    '<h2 class="text-sm font-bold text-slate-900 dark:text-slate-100">전체 기간 모델 비교 (' +
+    MARKET_NAMES[state.key] + ' · ' + (state.horizon === 5 ? '5거래일' : '1거래일') + ' · ' + pairs.length + '회)</h2>' +
     '</div>' +
     '<div class="overflow-x-auto">' +
     '<table class="w-full text-xs text-left border-collapse">' +
-    '<thead><tr class="border-b border-slate-200 text-slate-500">' +
+    '<thead><tr class="border-b border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400">' +
     '<th class="py-2 pr-2 font-semibold">모델</th>' +
     '<th class="py-2 px-2 font-semibold text-right">브라이어 점수</th>' +
     '<th class="py-2 pl-2 font-semibold text-right">80% 구간 적중률</th>' +
     '</tr></thead>' +
-    '<tbody class="divide-y divide-slate-100 tabular-nums">' +
-    '<tr class="bg-teal-50/50 font-semibold text-slate-900">' +
-    '<td class="py-2.5 pr-2">개선 v5.9 (시장별 전용 엔진)</td>' +
-    '<td class="py-2.5 px-2 text-right text-teal-800">' +
-    fmtB(brierV4) +
-    '</td>' +
-    '<td class="py-2.5 pl-2 text-right text-teal-800">' +
-    fmtPct(covV4) +
-    '</td>' +
+    '<tbody class="divide-y divide-slate-100 dark:divide-slate-800/90 tabular-nums">' +
+    '<tr class="bg-teal-50/60 dark:bg-teal-500/10 font-semibold text-slate-900 dark:text-slate-100">' +
+    '<td class="py-2.5 pr-2">개선 v6.0 (시장별 전용 엔진)</td>' +
+    '<td class="py-2.5 px-2 text-right text-teal-800 dark:text-teal-300">' + fmtB(brierV4) + '</td>' +
+    '<td class="py-2.5 pl-2 text-right text-teal-800 dark:text-teal-300">' + fmtPct(covV4) + '</td>' +
     '</tr>' +
-    '<tr class="text-slate-700">' +
+    '<tr class="text-slate-700 dark:text-slate-300">' +
     '<td class="py-2.5 pr-2">기본 v2 (균등 가중 로지스틱)</td>' +
-    '<td class="py-2.5 px-2 text-right">' +
-    fmtB(brierV2) +
-    '</td>' +
-    '<td class="py-2.5 pl-2 text-right">' +
-    fmtPct(covV2) +
-    '</td>' +
+    '<td class="py-2.5 px-2 text-right">' + fmtB(brierV2) + '</td>' +
+    '<td class="py-2.5 pl-2 text-right">' + fmtPct(covV2) + '</td>' +
     '</tr>' +
     (state.horizon === 1
-      ? '<tr class="text-slate-600"><td class="py-2.5 pr-2">기존 v1 (단순 k-NN)</td><td class="py-2.5 px-2 text-right">' +
-        fmtB(brierV1) +
-        '</td><td class="py-2.5 pl-2 text-right">' +
-        fmtPct(covV1) +
-        '</td></tr>'
+      ? '<tr class="text-slate-600 dark:text-slate-400"><td class="py-2.5 pr-2">기존 v1 (단순 k-NN)</td><td class="py-2.5 px-2 text-right">' +
+        fmtB(brierV1) + '</td><td class="py-2.5 pl-2 text-right">' + fmtPct(covV1) + '</td></tr>'
       : '') +
-    '<tr class="text-slate-500">' +
+    '<tr class="text-slate-500 dark:text-slate-500">' +
     '<td class="py-2.5 pr-2">단순 기준 모델 (과거 상승 빈도)</td>' +
-    '<td class="py-2.5 px-2 text-right">' +
-    fmtB(brierBase) +
-    '</td>' +
+    '<td class="py-2.5 px-2 text-right">' + fmtB(brierBase) + '</td>' +
     '<td class="py-2.5 pl-2 text-right">-</td>' +
     '</tr>' +
     '</tbody></table></div>' +
     '</section>' +
-    '<section class="mt-3 rounded-2xl bg-white border border-slate-200 p-4 shadow-sm">' +
-    '<h2 class="text-sm font-bold text-slate-900 mb-1">실시간 조회 서버 연결 (Cloudflare Workers)</h2>' +
-    '<p class="text-xs text-slate-500 mb-2">Cloudflare Workers에 배포한 중계 URL을 저장하면 상단 <strong>실시간 조회</strong> 버튼으로 KIS 국내지수·코스피200 선물·나스닥 선물을 즉시 반영합니다.</p>' +
+    '<section class="mt-3 rounded-2xl surface-card p-4 shadow-sm' + boardCls(3) + '">' +
+    '<h2 class="text-sm font-bold text-slate-900 dark:text-slate-100 mb-1">실시간 조회 서버 연결 (Cloudflare Workers)</h2>' +
+    '<p class="text-xs text-slate-500 dark:text-slate-400 mb-2">Cloudflare Workers에 배포한 중계 URL을 저장하면 상단 <strong>실시간 조회</strong> 버튼으로 KIS 국내지수·코스피200 선물·나스닥 선물을 즉시 반영합니다.</p>' +
     '<div class="flex gap-2">' +
     '<input id="worker-url-input" type="url" placeholder="https://index-daybook-live.xxx.workers.dev" value="' +
     escapeHtml(state.workerUrl) +
-    '" class="flex-1 text-xs border border-slate-300 rounded-xl px-3 py-2 text-slate-800" />' +
-    '<button id="worker-url-save" type="button" class="px-3.5 py-2 rounded-xl bg-teal-700 text-white text-xs font-semibold hover:bg-teal-800 transition whitespace-nowrap">저장</button>' +
+    '" class="flex-1 text-xs border border-slate-300 dark:border-slate-700 rounded-xl px-3 py-2 text-slate-800 dark:text-slate-100 bg-white dark:bg-slate-800/90" />' +
+    '<button id="worker-url-save" type="button" class="px-3.5 py-2 rounded-xl bg-teal-600 text-white text-xs font-bold hover:bg-teal-500 transition whitespace-nowrap">저장</button>' +
     '</div>' +
     '</section>' +
-    '<section class="mt-3 rounded-2xl bg-white border border-slate-200 p-4 shadow-sm">' +
-    '<h2 class="text-sm font-bold text-slate-900 mb-1.5">최신 데이터 불러오기 (data.js / JSON / CSV)</h2>' +
+    '<section class="mt-3 rounded-2xl surface-card p-4 shadow-sm' + boardCls(4) + '">' +
+    '<h2 class="text-sm font-bold text-slate-900 dark:text-slate-100 mb-1.5">최신 데이터 불러오기 (data.js / JSON / CSV)</h2>' +
     '<div class="flex flex-wrap items-center gap-2 mt-2">' +
-    '<label class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900 text-white text-xs font-semibold cursor-pointer hover:bg-slate-800 transition">' +
+    '<label class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900 dark:bg-teal-600 text-white text-xs font-bold cursor-pointer hover:bg-slate-800 dark:hover:bg-teal-500 transition">' +
     '<span>파일 선택 (JS/JSON/CSV)</span>' +
     '<input id="file-import" type="file" accept=".js,.json,.csv,.txt" class="hidden" />' +
     '</label>' +
-    '<button id="data-reset" type="button" class="px-3.5 py-2 rounded-xl border border-slate-300 text-slate-700 text-xs font-semibold hover:bg-slate-50 transition">기본 스냅샷 복원</button>' +
+    '<button id="data-reset" type="button" class="px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-xs font-semibold hover:bg-slate-50 dark:hover:bg-slate-800 transition">기본 스냅샷 복원</button>' +
     '</div>' +
-    '<div class="mt-3 text-xs text-slate-500">현재 수록: 코스피 ' +
-    (state.marketsData.KOSPI || []).length +
-    '일 · 코스닥 ' +
-    (state.marketsData.KOSDAQ || []).length +
-    '일 · 나스닥 ' +
-    (state.marketsData.NASDAQ || []).length +
-    '일</div>' +
+    '<div class="mt-3 text-xs text-slate-500 dark:text-slate-400">현재 수록: 코스피 ' +
+    (state.marketsData.KOSPI || []).length + '일 · 코스닥 ' +
+    (state.marketsData.KOSDAQ || []).length + '일 · 나스닥 ' +
+    (state.marketsData.NASDAQ || []).length + '일</div>' +
     '</section>';
 
   document.getElementById('file-import').addEventListener('change', handleFileImport);
@@ -1178,14 +1332,14 @@ function renderBacktest() {
         return;
       }
       state.workerUrl = val;
-      try { localStorage.setItem('daybook_worker_url', val); } catch (_) {}
+      writeStorage('daybook_worker_url', val);
       showToast(val ? '실시간 중계 서버 주소를 저장했습니다.' : '실시간 서버 주소를 비웠습니다.');
     });
   }
   document.getElementById('data-reset').addEventListener('click', () => {
     state.marketsData = JSON.parse(JSON.stringify(markets));
     state.isLiveIntraday = false;
-    recomputeMarket(state.key, false);
+    recomputeMarket(state.key, false, true);
     showToast('기본 수록 데이터(종가)로 복원했습니다.');
   });
 }
@@ -1205,8 +1359,8 @@ function handleFileImport(event) {
         }
         validateImport(parsed);
         state.marketsData = { ...state.marketsData, ...parsed };
-        recomputeMarket(state.key, false);
-        showToast('데이터를 반영해 v5.9 전체 모델을 재계산했습니다.');
+        recomputeMarket(state.key, false, true);
+        showToast('데이터를 반영해 v6.0 전체 모델을 재계산했습니다.');
       } else {
         const lines = text
           .split(/\r?\n/)
@@ -1222,7 +1376,7 @@ function handleFileImport(event) {
         if (rows.length < 25) throw new Error('유효한 CSV 행이 최소 25개 이상 필요합니다.');
         validateImport({ [state.key]: rows });
         state.marketsData[state.key] = rows;
-        recomputeMarket(state.key, false);
+        recomputeMarket(state.key, false, true);
         showToast(MARKET_NAMES[state.key] + ' CSV ' + rows.length + '일을 반영했습니다.');
       }
     } catch (err) {
@@ -1237,7 +1391,6 @@ function renderAll() {
   renderSimulator();
   if (state.tab === 'backtest') renderBacktest();
 }
-
 
 async function fetchLiveSnapshot(isAuto) {
   const btn = document.getElementById('live-fetch-btn');
@@ -1286,9 +1439,9 @@ async function fetchLiveSnapshot(isAuto) {
 
     state.isLiveIntraday = true;
     state.liveUpdatedKst = data.updatedKst || '';
-    recomputeMarket(state.key, false);
+    recomputeMarket(state.key, false, true);
     const warnMsg = data.warnings && data.warnings.length ? ' (' + data.warnings[0] + ')' : '';
-    if (!isAuto) showToast('실시간 시세와 글로벌 뉴스를 반영했습니다.' + warnMsg);
+    if (!isAuto) showToast('실시간 시세와 국내 증시 속보를 반영했습니다.' + warnMsg);
   } catch (err) {
     showToast('실시간 조회 실패: ' + err.message, true);
   } finally {
@@ -1300,20 +1453,29 @@ async function fetchLiveSnapshot(isAuto) {
 }
 
 function initApp() {
+  applyTheme(state.theme, false);
+
+  const themeBtn = document.getElementById('theme-toggle-btn');
+  if (themeBtn) {
+    themeBtn.addEventListener('click', () => {
+      applyTheme(isDark() ? 'light' : 'dark', true);
+    });
+  }
+
   const tabsEl = document.getElementById('market-tabs');
   for (const [id, label] of Object.entries(MARKET_NAMES)) {
     const b = document.createElement('button');
     b.type = 'button';
     b.textContent = label;
     b.dataset.key = id;
-    b.addEventListener('click', () => recomputeMarket(id, false));
+    b.addEventListener('click', () => recomputeMarket(id, false, true));
     tabsEl.append(b);
   }
 
   for (const btn of document.querySelectorAll('#horizon-tabs button')) {
     btn.addEventListener('click', () => {
       state.horizon = Number(btn.dataset.h);
-      recomputeMarket(state.key, true);
+      recomputeMarket(state.key, true, true);
     });
   }
 
@@ -1323,6 +1485,7 @@ function initApp() {
 
   document.getElementById('date-select').addEventListener('change', e => {
     state.dateIdx = Number(e.target.value);
+    state.animateBoard = true;
     const rows = state.marketsData[state.key] || [];
     const rawF = forecastSingleDay(rows, state.dateIdx, state.key, state.marketsData, state.horizon);
     const isLatest = state.dateIdx === state.latestValidIdx;
@@ -1348,7 +1511,7 @@ function initApp() {
 
   const liveBtn = document.getElementById('live-fetch-btn');
   if (liveBtn) liveBtn.addEventListener('click', () => fetchLiveSnapshot(false));
-  recomputeMarket('KOSPI', false);
+  recomputeMarket('KOSPI', false, true);
   switchTab('forecast');
   if (state.workerUrl) fetchLiveSnapshot(true);
 }

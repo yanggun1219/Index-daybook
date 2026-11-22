@@ -247,121 +247,95 @@ function cleanXmlText(s) {
     .trim();
 }
 
-async function translateEnToKo(text) {
-  try {
-    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ko&dt=t&q=${encodeURIComponent(text)}`;
-    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    if (!res.ok) return text;
-    const json = await res.json();
-    const parts = Array.isArray(json?.[0]) ? json[0].map(seg => seg[0] || '').join('') : '';
-    return parts.trim() || text;
-  } catch (_) {
-    return text;
-  }
-}
-
-async function fetchRssPool(source, url, isEnglish) {
+async function fetchRssPool(source, url, isGoogleNews = false) {
   const out = [];
   try {
     const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     if (!res.ok) return out;
     const xml = await res.text();
-    const blocks = (xml.match(/<item\b[\s\S]*?<\/item>/gi) || []).slice(0, 10);
+    const blocks = (xml.match(/<item\b[\s\S]*?<\/item>/gi) || []).slice(0, 12);
     for (const blk of blocks) {
       const tm = blk.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i);
       const lm = blk.match(/<link\b[^>]*>([\s\S]*?)<\/link>/i);
       const dm = blk.match(/<description\b[^>]*>([\s\S]*?)<\/description>/i);
       const pm = blk.match(/<(?:pubDate|dc:date|updated)\b[^>]*>([\s\S]*?)<\/(?:pubDate|dc:date|updated)>/i);
-      const title = cleanXmlText(tm ? tm[1] : '');
+      const sm = isGoogleNews ? blk.match(/<source\b[^>]*>([\s\S]*?)<\/source>/i) : null;
+
+      let title = cleanXmlText(tm ? tm[1] : '');
       const link = cleanXmlText(lm ? lm[1] : '');
-      let summary = cleanXmlText(dm ? dm[1] : '');
+      let pubSource = sm ? cleanXmlText(sm[1]) : source;
+      if (isGoogleNews && pubSource && title.endsWith(` - ${pubSource}`)) {
+        title = title.slice(0, -(` - ${pubSource}`).length).trim();
+      }
+      let summary = isGoogleNews ? '' : cleanXmlText(dm ? dm[1] : '');
       if (summary.length > 96) summary = summary.slice(0, 95) + '…';
       let rawDate = pm ? cleanXmlText(pm[1]) : '';
       if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}/.test(rawDate)) rawDate = rawDate.replace(' ', 'T') + '+09:00';
       const pubMs = rawDate ? Date.parse(rawDate) : 0;
       if (!title) continue;
-      out.push({ title, summary, url: link, source, pubMs: Number.isFinite(pubMs) ? pubMs : 0, isEnglish });
-    }
-  } catch (_) {}
-  return out;
-}
-
-async function fetchYahooNewsPool() {
-  const out = [];
-  try {
-    const yUrl = 'https://query1.finance.yahoo.com/v1/finance/search?q=NASDAQ+Fed+stock+market&newsCount=10&quotesCount=0';
-    const res = await fetch(yUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    if (!res.ok) return out;
-    const json = await res.json();
-    for (const n of (json.news || [])) {
-      const title = String(n.title || '').trim();
-      const link = String(n.link || '').trim();
-      const source = String(n.publisher || 'Yahoo Finance').trim();
-      const pubMs = Number(n.providerPublishTime) ? Number(n.providerPublishTime) * 1000 : 0;
-      if (!title) continue;
-      out.push({ title, summary: '', url: link, source, pubMs, isEnglish: true });
+      out.push({ title, summary, url: link, source: pubSource || source, pubMs: Number.isFinite(pubMs) ? pubMs : 0 });
     }
   } catch (_) {}
   return out;
 }
 
 async function fetchLiveNews(kst) {
-  const [sed, nws, fnn, yna, hk, mk, ed, gnKr, wsj, mw, cnbc, yh] = await Promise.all([
-    fetchRssPool('서울경제', 'https://m.sedaily.com/rss/newsall', false),
-    fetchRssPool('뉴시스', 'https://www.newsis.com/RSS/economy.xml', false),
-    fetchRssPool('파이낸셜뉴스', 'https://www.fnnews.com/rss/r20/fn_realnews_stock.xml', false),
-    fetchRssPool('연합뉴스', 'https://www.yna.co.kr/rss/economy.xml', false),
-    fetchRssPool('한국경제', 'https://www.hankyung.com/feed/finance', false),
-    fetchRssPool('매일경제', 'https://www.mk.co.kr/rss/50200011/', false),
-    fetchRssPool('이데일리', 'https://rss.edaily.co.kr/economy_news.xml', false),
-    fetchRssPool('구글뉴스 증시', 'https://news.google.com/rss/search?q=%EC%BD%94%EC%8A%A4%ED%94%BC+OR+%EB%82%98%EC%8A%A4%EB%8B%A5+OR+%EC%A6%9D%EC%8B%9C+when:1d&hl=ko&gl=KR&ceid=KR:ko', false),
-    fetchRssPool('WSJ', 'https://feeds.content.dowjones.io/public/rss/RSSMarketsMain', true),
-    fetchRssPool('MarketWatch', 'https://feeds.content.dowjones.io/public/rss/mw_topstories', true),
-    fetchRssPool('CNBC', 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664', true),
-    fetchYahooNewsPool()
+  const [sed, nws, fnn, yna, hk, mk, ed, cho, her, mt, prm, gnKr, gnUs] = await Promise.all([
+    fetchRssPool('서울경제', 'https://www.sedaily.com/rss/newsall'),
+    fetchRssPool('뉴시스', 'https://www.newsis.com/RSS/economy.xml'),
+    fetchRssPool('파이낸셜뉴스', 'https://www.fnnews.com/rss/r20/fn_realnews_stock.xml'),
+    fetchRssPool('연합뉴스', 'https://www.yna.co.kr/rss/economy.xml'),
+    fetchRssPool('한국경제', 'https://www.hankyung.com/feed/finance'),
+    fetchRssPool('매일경제', 'https://www.mk.co.kr/rss/50200011/'),
+    fetchRssPool('이데일리', 'https://rss.edaily.co.kr/economy_news.xml'),
+    fetchRssPool('조선일보', 'https://www.chosun.com/arc/outboundfeeds/rss/category/economy/?outputType=xml'),
+    fetchRssPool('헤럴드경제', 'https://biz.heraldcorp.com/rss/google/newsAll'),
+    fetchRssPool('머니투데이', 'http://rss.mt.co.kr/mt_news.xml'),
+    fetchRssPool('프라임경제', 'https://www.newsprime.co.kr/data/rss/news.xml'),
+    fetchRssPool('구글뉴스', 'https://news.google.com/rss/search?q=%EC%BD%94%EC%8A%A4%ED%94%BC+OR+%EC%BD%94%EC%8A%A4%EB%8B%A5+OR+%EC%A6%9D%EC%8B%9C+when:1d&hl=ko&gl=KR&ceid=KR:ko', true),
+    fetchRssPool('구글뉴스', 'https://news.google.com/rss/search?q=%EB%82%98%EC%8A%A4%EB%8B%A5+OR+%EB%AF%B8%EA%B5%AD%EC%A6%9D%EC%8B%9C+OR+%EC%97%B0%EC%A4%80+OR+%EB%89%B4%EC%9A%95%EC%A6%9D%EC%8B%9C+when:1d&hl=ko&gl=KR&ceid=KR:ko', true)
   ]);
 
-  // 서울경제 전체 피드는 증시·경제 키워드만 필터링해 잡뉴스 제외
-  const ecoRe = /코스피|코스닥|나스닥|증시|주가|선물|환율|금리|연준|반도체|삼성|하이닉스|외국인|공매도|유가|비트코인|경제|금융|채권|ETF|미국|뉴욕|관세|자사주|펀드/;
-  const sedFiltered = sed.filter(it => ecoRe.test(it.title));
-  const all = [...sedFiltered, ...nws, ...fnn, ...yna, ...hk, ...mk, ...ed, ...gnKr, ...wsj, ...mw, ...cnbc, ...yh].sort((a, b) => b.pubMs - a.pubMs);
+  // 전체 종합 피드는 증시·경제 키워드만 필터링해 잡뉴스 제외
+  const ecoRe = /코스피|코스닥|나스닥|증시|주가|선물|환율|금리|연준|반도체|삼성|하이닉스|외국인|공매도|유가|비트코인|경제|금융|채권|ETF|미국|뉴욕|관세|자사주|펀드|월가|다우|S&P|트럼프|증안/;
+  const all = [
+    ...sed.filter(it => ecoRe.test(it.title)),
+    ...nws,
+    ...fnn,
+    ...yna,
+    ...hk,
+    ...mk,
+    ...ed,
+    ...cho,
+    ...her.filter(it => ecoRe.test(it.title)),
+    ...mt.filter(it => ecoRe.test(it.title)),
+    ...prm.filter(it => ecoRe.test(it.title)),
+    ...gnKr,
+    ...gnUs
+  ].sort((a, b) => b.pubMs - a.pubMs);
+
   const picked = [];
   const seen = new Set();
-  // 매체 제한 없이 9개 언론사 통합 순수 최신 속보순 상위 15건 선별
+  // 국내 언론사 통합 순수 최신 속보순 상위 15건 선별 (중복 제목 정규화 제거)
   for (const item of all) {
-    if (seen.has(item.title)) continue;
-    seen.add(item.title);
+    const normKey = item.title.replace(/[\s"'‘’“”·….,!?\[\]()]/g, '').slice(0, 22);
+    if (!normKey || seen.has(normKey)) continue;
+    seen.add(normKey);
     picked.push(item);
     if (picked.length >= 15) break;
   }
-  picked.sort((a, b) => b.pubMs - a.pubMs);
 
-  const items = await Promise.all(
-    picked.map(async it => {
-      const age = formatAgeKo(it.pubMs, kst.nowMs);
-      const srcLabel = age ? `${it.source} · ${age}` : it.source;
-      if (it.isEnglish) {
-        const koTitle = await translateEnToKo(it.title);
-        const koUrl = it.url
-          ? `https://translate.google.com/translate?sl=en&tl=ko&u=${encodeURIComponent(it.url)}`
-          : '';
-        return {
-          title: koTitle,
-          summary: koTitle !== it.title ? `원문: ${it.title}` : '',
-          url: koUrl,
-          source: srcLabel,
-          translated: true
-        };
-      }
-      return {
-        title: it.title,
-        summary: it.summary,
-        url: it.url,
-        source: srcLabel,
-        translated: false
-      };
-    })
-  );
+  const items = picked.map(it => {
+    const age = formatAgeKo(it.pubMs, kst.nowMs);
+    const srcLabel = age ? `${it.source} · ${age}` : it.source;
+    return {
+      title: it.title,
+      summary: it.summary,
+      url: it.url,
+      source: srcLabel,
+      translated: false
+    };
+  });
 
   // 투심 점수는 가장 최신 8건 기준으로 산출
   let pos = 0;
@@ -436,7 +410,7 @@ async function fetchDetailedChart(key, tf) {
         const l = Number.isFinite(lows[i]) ? Number(lows[i].toFixed(2)) : Number(c.toFixed(2));
         out.push([lbl, Number(c.toFixed(2)), h, l]);
       }
-      if (out.length) return out.slice(-cfg.limit);
+      if (out.length >= 5) return out.slice(-cfg.limit);
     } catch (_) {
       continue;
     }
@@ -456,7 +430,7 @@ export default {
       const key = (url.searchParams.get('key') || '').toUpperCase();
       const tf = url.searchParams.get('tf') || '15m';
       const cache = caches.default;
-      const cKey = new Request(`https://kis-chart-cache.internal/v59/${key}/${tf}`);
+      const cKey = new Request(`https://kis-chart-cache.internal/v593/${key}/${tf}`);
       const hit = await cache.match(cKey);
       if (hit) return new Response(await hit.text(), { status: 200, headers });
       const points = await fetchDetailedChart(key, tf);
@@ -469,7 +443,7 @@ export default {
     }
 
     const cache = caches.default;
-    const respCacheKey = new Request('https://kis-live-cache.internal/v59/live');
+    const respCacheKey = new Request('https://kis-live-cache.internal/v593/live');
     const cachedResp = await cache.match(respCacheKey);
     if (cachedResp) {
       const body = await cachedResp.text();
