@@ -849,9 +849,9 @@ function analyzeIndividualStock(payload) {
     const feat = [ret1, ret5, vol10];
     let ok = true;
     for (const pr of peers) {
-      // 한국 종목은 개장 전 마감된 미국/글로벌 전일 종가만 참조 (strictBefore = true), 미국 종목은 당일 종가 참조
-      const strictBefore = isKr && pr.sym !== '^KS11' && pr.sym !== '^KQ11';
-      const pv = lookupPeerVal(pr.rows, curDate, strictBefore, pr.isLevel);
+      // 뉴욕 거래일 기준 동일 날짜(d <= curDate) 미국장은 한국장(15:30 KST) 마감 후 ~ 다음날 한국장 개장 전에 마감되므로
+      // 다음 거래일 한국 종목 예측의 핵심 야간 선행 신호임 (Zero Lookahead).
+      const pv = lookupPeerVal(pr.rows, curDate, false, pr.isLevel);
       if (!Number.isFinite(pv)) {
         ok = false;
         break;
@@ -870,11 +870,12 @@ function analyzeIndividualStock(payload) {
 
   const trainAll = samples.filter(s => s.nextRet !== null);
   const latest = samples[samples.length - 1];
-  const halfLife = 260;
-  const lambda = 35;
+  const halfLife = 420;
+  const lambda = 95;
+  const shrink = 0.72; // 개별 종목 노이즈 과신 방지용 확률 보정 계수
 
-  // 1. 확장 윈도우 워크포워드 백테스트 (과적합 방지, 10거래일마다 재학습)
-  const warmup = Math.min(80, Math.floor(trainAll.length * 0.45));
+  // 1. 확장 윈도우 워크포워드 백테스트 (5년 표본, 15거래일마다 재학습)
+  const warmup = Math.min(180, Math.floor(trainAll.length * 0.35));
   let curModel = null;
   let brierSum = 0;
   let baseBrierSum = 0;
@@ -885,7 +886,7 @@ function analyzeIndividualStock(payload) {
   let hiBrierSum = 0;
 
   for (let t = warmup; t < trainAll.length; t++) {
-    if (!curModel || (t - warmup) % 10 === 0) {
+    if (!curModel || (t - warmup) % 15 === 0) {
       const slice = trainAll.slice(0, t);
       const X = slice.map(s => s.feat);
       const y = slice.map(s => (s.nextRet > 0 ? 1 : 0));
@@ -893,7 +894,8 @@ function analyzeIndividualStock(payload) {
       curModel = fitStockLogistic(X, y, w, lambda);
     }
     const s = trainAll[t];
-    const pred = predictStockRow(curModel, s.feat);
+    const rawPred = predictStockRow(curModel, s.feat);
+    const pred = { p: 0.5 + shrink * (rawPred.p - 0.5), contribPct: rawPred.contribPct.map(v => v * shrink) };
     const actualUp = s.nextRet > 0 ? 1 : 0;
     const upRate = trainAll.slice(0, t).reduce((a, v) => a + (v.nextRet > 0 ? 1 : 0), 0) / t;
     brierSum += (pred.p - actualUp) ** 2;
@@ -914,7 +916,8 @@ function analyzeIndividualStock(payload) {
   const yall = trainAll.map(s => (s.nextRet > 0 ? 1 : 0));
   const wall = trainAll.map((_, k) => Math.pow(0.5, (trainAll.length - 1 - k) / halfLife));
   const finalModel = fitStockLogistic(Xall, yall, wall, lambda);
-  const out = predictStockRow(finalModel, latest.feat);
+  const rawOut = predictStockRow(finalModel, latest.feat);
+  const out = { p: 0.5 + shrink * (rawOut.p - 0.5), contribPct: rawOut.contribPct.map(v => v * shrink) };
 
   const upRets = trainAll.filter(s => s.nextRet > 0).map(s => s.nextRet).sort((a, b) => a - b);
   const dnRets = trainAll.filter(s => s.nextRet <= 0).map(s => s.nextRet).sort((a, b) => a - b);

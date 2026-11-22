@@ -1,4 +1,4 @@
-// 지수 관측소 v7.0 — 다크모드 금융 터미널 리뉴얼 + 보드/카운트업/차트 드로우 애니메이션
+// 지수 관측소 v7.1 — 다크모드 금융 터미널 리뉴얼 + 보드/카운트업/차트 드로우 애니메이션
 
 const MARKET_NAMES = {
   KOSPI: '코스피',
@@ -1292,7 +1292,7 @@ function renderBacktest() {
     '</tr></thead>' +
     '<tbody class="divide-y divide-slate-100 dark:divide-slate-800/90 tabular-nums">' +
     '<tr class="bg-teal-50/60 dark:bg-teal-500/10 font-semibold text-slate-900 dark:text-slate-100">' +
-    '<td class="py-2.5 pr-2">개선 v7.0 (시장별 전용 엔진)</td>' +
+    '<td class="py-2.5 pr-2">개선 v7.1 (시장별 전용 엔진)</td>' +
     '<td class="py-2.5 px-2 text-right text-teal-800 dark:text-teal-300">' + fmtB(brierV4) + '</td>' +
     '<td class="py-2.5 pl-2 text-right text-teal-800 dark:text-teal-300">' + fmtPct(covV4) + '</td>' +
     '</tr>' +
@@ -1375,7 +1375,7 @@ function handleFileImport(event) {
         validateImport(parsed);
         state.marketsData = { ...state.marketsData, ...parsed };
         recomputeMarket(state.key, false, true);
-        showToast('데이터를 반영해 v7.0 전체 모델을 재계산했습니다.');
+        showToast('데이터를 반영해 v7.1 전체 모델을 재계산했습니다.');
       } else {
         const lines = text
           .split(/\r?\n/)
@@ -1608,7 +1608,7 @@ function renderStockTab() {
     bodyHtml =
       '<section class="mt-3 rounded-2xl surface-card p-5 text-center">' +
       '<div class="text-sm font-bold text-slate-900 dark:text-slate-100">실시간 중계 서버(Cloudflare Workers) 연결 필요</div>' +
-      '<p class="mt-1.5 text-xs text-slate-500 dark:text-slate-400 leading-relaxed">개별 종목 2년 일봉·업종별 선행지표·종목 속보 뉴스를 실시간으로 수집하기 위해 Cloudflare Workers URL이 필요합니다. v7.0 Worker를 배포한 뒤 아래 버튼으로 주소를 저장해 주세요.</p>' +
+      '<p class="mt-1.5 text-xs text-slate-500 dark:text-slate-400 leading-relaxed">개별 종목 2년 일봉·업종별 선행지표·종목 속보 뉴스를 실시간으로 수집하기 위해 Cloudflare Workers URL이 필요합니다. v7.1 Worker를 배포한 뒤 아래 버튼으로 주소를 저장해 주세요.</p>' +
       '<button id="stock-goto-worker" type="button" class="mt-3 px-4 py-2 rounded-xl bg-teal-600 hover:bg-teal-500 text-white text-xs font-bold transition">Workers 주소 설정하러 가기</button>' +
       '</section>';
   } else if (state.stockLoading) {
@@ -1623,7 +1623,7 @@ function renderStockTab() {
       '<section class="mt-3 rounded-2xl surface-card p-5 text-center">' +
       '<div class="text-sm font-bold text-rose-600 dark:text-rose-400">종목 조회 오류</div>' +
       '<p class="mt-1.5 text-xs text-slate-600 dark:text-slate-400">' + escapeHtml(state.stockError) + '</p>' +
-      '<p class="mt-1 text-[11px] text-slate-400 dark:text-slate-500">Cloudflare Worker가 v7.0(`/stock` 지원)으로 배포되었는지 확인해 주세요.</p>' +
+      '<p class="mt-1 text-[11px] text-slate-400 dark:text-slate-500">Cloudflare Worker가 v7.1(`/stock` 지원)으로 배포되었는지 확인해 주세요.</p>' +
       '</section>';
   } else if (state.stockResult) {
     const s = state.stockResult;

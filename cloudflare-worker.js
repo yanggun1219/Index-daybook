@@ -547,13 +547,13 @@ const KR_STOCK_DICT = {
 
 async function fetchYahooDaily2Y(symbol) {
   const cache = caches.default;
-  const cKey = new Request(`https://kis-y2y-cache.internal/v700/${encodeURIComponent(symbol)}`);
+  const cKey = new Request(`https://kis-y5y-cache.internal/v710/${encodeURIComponent(symbol)}`);
   const hit = await cache.match(cKey);
   if (hit) {
     try { return await hit.json(); } catch (_) {}
   }
   try {
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=2y&interval=1d`;
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=5y&interval=1d`;
     const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     if (!res.ok) return null;
     const json = await res.json();
@@ -561,12 +561,14 @@ async function fetchYahooDaily2Y(symbol) {
     const meta = r0?.meta || {};
     const ts = r0?.timestamp || [];
     const closes = r0?.indicators?.quote?.[0]?.close || [];
+    const isKrSym = symbol.endsWith('.KS') || symbol.endsWith('.KQ') || symbol === '^KS11' || symbol === '^KQ11';
+    const tzOffsetMs = isKrSym ? 9 * 3600 * 1000 : -5 * 3600 * 1000;
     const rows = [];
     let prevClose = null;
     for (let i = 0; i < ts.length; i++) {
       const c = closes[i];
       if (!Number.isFinite(c) || c <= 0) continue;
-      const d = new Date(ts[i] * 1000 + 9 * 3600 * 1000).toISOString().slice(0, 10);
+      const d = new Date(ts[i] * 1000 + tzOffsetMs).toISOString().slice(0, 10);
       const pct = prevClose ? Number((((c / prevClose) - 1) * 100).toFixed(2)) : 0;
       if (rows.length && rows[rows.length - 1][0] === d) {
         rows[rows.length - 1] = [d, Number(c.toFixed(2)), pct];
@@ -579,7 +581,7 @@ async function fetchYahooDaily2Y(symbol) {
     const out = {
       symbol: meta.symbol || symbol,
       name: meta.shortName || meta.longName || symbol,
-      currency: meta.currency || (symbol.endsWith('.KS') || symbol.endsWith('.KQ') ? 'KRW' : 'USD'),
+      currency: meta.currency || (isKrSym ? 'KRW' : 'USD'),
       rows
     };
     await cache.put(cKey, new Response(JSON.stringify(out), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'max-age=900' } }));
@@ -669,7 +671,7 @@ async function handleStockRequest(url, env, headers) {
   const sectorKey = SECTOR_PROFILES[reqSector] ? reqSector : (SECTOR_PROFILES[target.sector] ? target.sector : 'general');
   const profile = SECTOR_PROFILES[sectorKey];
   const cache = caches.default;
-  const cKey = new Request(`https://kis-stock-cache.internal/v700/${encodeURIComponent(target.sym)}/${sectorKey}`);
+  const cKey = new Request(`https://kis-stock-cache.internal/v710/${encodeURIComponent(target.sym)}/${sectorKey}`);
   const hit = await cache.match(cKey);
   if (hit) return new Response(await hit.text(), { status: 200, headers });
 
@@ -700,40 +702,66 @@ async function handleStockRequest(url, env, headers) {
     return null;
   })();
 
-  const newsQuery = encodeURIComponent(`${target.name.split(' ')[0]} 주가 OR 실적 when:7d`);
-  const newsPromise = fetchRssPool('구글뉴스', `https://news.google.com/rss/search?q=${newsQuery}&hl=ko&gl=KR&ceid=KR:ko`, true);
+  const kwRaw = target.name.split(' ')[0].replace(/\(.*\)/g, '').trim();
+  const kwAlt = kwRaw.replace(/^SK/i, '').replace(/^LG/i, '').replace(/^HD/i, '').trim();
+  const newsPromises = Promise.all([
+    fetchRssPool('구글뉴스', `https://news.google.com/rss/search?q=${encodeURIComponent(kwRaw)}&hl=ko&gl=KR&ceid=KR:ko`, true),
+    fetchRssPool('한국경제', 'https://www.hankyung.com/feed/finance'),
+    fetchRssPool('매일경제', 'https://www.mk.co.kr/rss/50200011/'),
+    fetchRssPool('연합뉴스', 'https://www.yna.co.kr/rss/economy.xml'),
+    fetchRssPool('이데일리', 'https://rss.edaily.co.kr/economy_news.xml'),
+    fetchRssPool('파이낸셜뉴스', 'https://www.fnnews.com/rss/r20/fn_realnews_stock.xml')
+  ]);
 
-  const [peerResults, kisLive, rawNews] = await Promise.all([
+  const [peerResults, kisLive, newsPools] = await Promise.all([
     Promise.all(peerPromises),
     kisPromise,
-    newsPromise
+    newsPromises
   ]);
 
   const rows = mainData.rows.slice();
   let isLiveIntraday = false;
   if (kisLive && Number.isFinite(kisLive.close) && rows.length) {
+    const kstDateObj = new Date(kst.nowMs + 9 * 3600 * 1000);
+    const dow = kstDateObj.getUTCDay(); // 0=일, 6=토
+    const hh = kstDateObj.getUTCHours();
+    const isMarketDayOpen = dow >= 1 && dow <= 5 && hh >= 9;
     const last = rows[rows.length - 1];
     if (last[0] === kst.date) {
       rows[rows.length - 1] = [kst.date, kisLive.close, kisLive.pct];
       isLiveIntraday = true;
-    } else if (kst.date > last[0] && Math.abs(kisLive.close - last[1]) > 0.005) {
-      const calcPct = Number((((kisLive.close / last[1]) - 1) * 100).toFixed(2));
-      rows.push([kst.date, kisLive.close, calcPct]);
+    } else if (isMarketDayOpen && kst.date > last[0]) {
+      // 평일 09:00 이후에는 당일 KIS 현재가와 KIS 전일대비 등락률(prdy_ctrt)을 그대로 반영
+      rows.push([kst.date, kisLive.close, kisLive.pct]);
       isLiveIntraday = true;
+    } else {
+      // 주말·장전에는 가짜 날짜를 추가하지 않고 직전 영업일 종가를 KIS 공식 종가/등락률로 정밀 보정
+      rows[rows.length - 1] = [last[0], kisLive.close, kisLive.pct];
     }
   }
 
-  const news = rawNews
-    .sort((a, b) => b.pubMs - a.pubMs)
-    .slice(0, 5)
-    .map(it => {
-      const age = formatAgeKo(it.pubMs, kst.nowMs);
-      return {
-        title: it.title,
-        url: it.url,
-        source: age ? `${it.source} · ${age}` : it.source
-      };
+  const [gnStock, ...krDirectPools] = newsPools;
+  const kwLower = kwRaw.toLowerCase();
+  const kwAltLower = kwAlt.length >= 2 ? kwAlt.toLowerCase() : '';
+  const directMatched = krDirectPools.flat().filter(it => {
+    const t = `${it.title} ${it.summary || ''}`.toLowerCase();
+    return t.includes(kwLower) || (kwAltLower && t.includes(kwAltLower));
+  });
+  const mergedNews = [...directMatched, ...gnStock].sort((a, b) => b.pubMs - a.pubMs);
+  const seenNews = new Set();
+  const news = [];
+  for (const it of mergedNews) {
+    const nk = it.title.replace(/[\s"'‘’“”·….,!?\[\]()]/g, '').slice(0, 22);
+    if (!nk || seenNews.has(nk)) continue;
+    seenNews.add(nk);
+    const age = formatAgeKo(it.pubMs, kst.nowMs);
+    news.push({
+      title: it.title,
+      url: it.url,
+      source: age ? `${it.source} · ${age}` : it.source
     });
+    if (news.length >= 5) break;
+  }
 
   const body = JSON.stringify({
     symbol: mainData.symbol,
