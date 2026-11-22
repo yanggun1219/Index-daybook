@@ -1,4 +1,4 @@
-// 지수 관측소 v6.0 — 다크모드 금융 터미널 리뉴얼 + 보드/카운트업/차트 드로우 애니메이션
+// 지수 관측소 v7.0 — 다크모드 금융 터미널 리뉴얼 + 보드/카운트업/차트 드로우 애니메이션
 
 const MARKET_NAMES = {
   KOSPI: '코스피',
@@ -48,7 +48,14 @@ const state = {
   futChartInstance: null,
   chartInstance: null,
   animateBoard: true,
-  activeRafs: []
+  activeRafs: [],
+  stockQuery: 'SK하이닉스',
+  stockSectorOverride: '',
+  stockLoading: false,
+  stockError: '',
+  stockResult: null,
+  stockCache: {},
+  stockChartInstance: null
 };
 
 const fmtPct = x => (x === null || x === undefined || Number.isNaN(x) ? '-' : (100 * x).toFixed(1) + '%');
@@ -84,6 +91,7 @@ function applyTheme(mode, redrawCharts) {
   if (redrawCharts) {
     renderFuturesChart();
     renderPriceChart();
+    if (state.tab === 'stock' && state.stockResult) renderStockChart();
   }
 }
 
@@ -277,11 +285,18 @@ function switchTab(tabId) {
       : 'flex-1 py-2.5 text-sm font-medium border-b-2 border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 transition';
   }
   document.getElementById('panel-forecast').classList.toggle('hidden', tabId !== 'forecast');
+  document.getElementById('panel-stock').classList.toggle('hidden', tabId !== 'stock');
   document.getElementById('panel-simulator').classList.toggle('hidden', tabId !== 'simulator');
   document.getElementById('panel-backtest').classList.toggle('hidden', tabId !== 'backtest');
   if (tabId === 'forecast') {
     renderPriceChart();
     renderFuturesChart();
+  }
+  if (tabId === 'stock') {
+    renderStockTab();
+    if (!state.stockResult && !state.stockLoading && state.workerUrl) {
+      fetchAndAnalyzeStock(state.stockQuery, state.stockSectorOverride);
+    }
   }
   if (tabId === 'simulator') renderSimulator();
   if (tabId === 'backtest') renderBacktest();
@@ -1277,7 +1292,7 @@ function renderBacktest() {
     '</tr></thead>' +
     '<tbody class="divide-y divide-slate-100 dark:divide-slate-800/90 tabular-nums">' +
     '<tr class="bg-teal-50/60 dark:bg-teal-500/10 font-semibold text-slate-900 dark:text-slate-100">' +
-    '<td class="py-2.5 pr-2">개선 v6.0 (시장별 전용 엔진)</td>' +
+    '<td class="py-2.5 pr-2">개선 v7.0 (시장별 전용 엔진)</td>' +
     '<td class="py-2.5 px-2 text-right text-teal-800 dark:text-teal-300">' + fmtB(brierV4) + '</td>' +
     '<td class="py-2.5 pl-2 text-right text-teal-800 dark:text-teal-300">' + fmtPct(covV4) + '</td>' +
     '</tr>' +
@@ -1360,7 +1375,7 @@ function handleFileImport(event) {
         validateImport(parsed);
         state.marketsData = { ...state.marketsData, ...parsed };
         recomputeMarket(state.key, false, true);
-        showToast('데이터를 반영해 v6.0 전체 모델을 재계산했습니다.');
+        showToast('데이터를 반영해 v7.0 전체 모델을 재계산했습니다.');
       } else {
         const lines = text
           .split(/\r?\n/)
@@ -1384,6 +1399,473 @@ function handleFileImport(event) {
     }
   };
   reader.readAsText(file, 'utf-8');
+}
+
+
+const STOCK_PRESETS = [
+  { name: 'SK하이닉스', q: '000660', sector: 'semi', tag: '반도체' },
+  { name: '삼성전자', q: '005930', sector: 'semi', tag: '반도체' },
+  { name: 'LG에너지솔루션', q: '373220', sector: 'battery', tag: '2차전지' },
+  { name: '현대차', q: '005380', sector: 'auto', tag: '자동차' },
+  { name: 'HD현대중공업', q: '329180', sector: 'ship', tag: '조선·방산' },
+  { name: '셀트리온', q: '068270', sector: 'bio', tag: '바이오' },
+  { name: 'KB금융', q: '105560', sector: 'fin', tag: '금융' },
+  { name: 'NAVER', q: '035420', sector: 'tech', tag: '인터넷·AI' },
+  { name: '엔비디아', q: 'NVDA', sector: 'us_semi', tag: '미 반도체' },
+  { name: '테슬라', q: 'TSLA', sector: 'us_ev', tag: '미 전기차' }
+];
+
+const SECTOR_OPTIONS = [
+  ['', '업종 자동 매칭'],
+  ['semi', '반도체 (SOX·NVDA·MU·환율)'],
+  ['battery', '2차전지 (TSLA·LIT·금리·환율)'],
+  ['auto', '자동차·수출 (환율·S&P·유가·나스닥)'],
+  ['ship', '조선·방산 (유가·환율·산업재·S&P)'],
+  ['bio', '바이오·제약 (XBI·나스닥·금리·VIX)'],
+  ['fin', '금융·은행 (금리·XLF·VIX·코스피)'],
+  ['tech', '인터넷·AI (QQQ·금리·VIX·코스피)'],
+  ['us_semi', '미국 반도체·AI (SOX·나스닥·금리·VIX)'],
+  ['us_ev', '미국 전기차·성장 (나스닥·LIT·금리·VIX)'],
+  ['general', '일반 대형주 (나스닥·S&P·환율·VIX)']
+];
+
+function fmtStockPrice(val, currency) {
+  if (!Number.isFinite(val)) return '-';
+  if (currency === 'KRW') return Math.round(val).toLocaleString('ko-KR') + '원';
+  return '$' + val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+async function fetchAndAnalyzeStock(query, sectorOverride) {
+  const q = String(query || '').trim();
+  if (!q) {
+    showToast('종목명, 6자리 코드 또는 미국 티커를 입력해 주세요.', true);
+    return;
+  }
+  state.stockQuery = q;
+  state.stockSectorOverride = sectorOverride || '';
+  const baseUrl = (state.workerUrl || '').trim().replace(/\/+$/, '');
+  if (!baseUrl) {
+    state.stockError = '';
+    state.stockResult = null;
+    renderStockTab();
+    showToast('먼저 검증·데이터 탭에서 Cloudflare Workers 주소를 저장해 주세요.');
+    return;
+  }
+
+  const cacheKey = q.toUpperCase() + '|' + state.stockSectorOverride;
+  if (state.stockCache[cacheKey]) {
+    state.stockResult = state.stockCache[cacheKey];
+    state.stockError = '';
+    state.animateBoard = true;
+    renderStockTab();
+    return;
+  }
+
+  state.stockLoading = true;
+  state.stockError = '';
+  renderStockTab();
+  try {
+    const reqUrl =
+      baseUrl +
+      '/stock?q=' +
+      encodeURIComponent(q) +
+      (state.stockSectorOverride ? '&sector=' + encodeURIComponent(state.stockSectorOverride) : '');
+    const res = await fetch(reqUrl, { cache: 'no-store' });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || '종목 데이터 조회 실패 (' + res.status + ')');
+    const analysis = analyzeIndividualStock(data);
+    if (analysis.error) throw new Error(analysis.error);
+    state.stockCache[cacheKey] = analysis;
+    state.stockResult = analysis;
+    state.stockError = '';
+    state.animateBoard = true;
+  } catch (err) {
+    state.stockError = err.message || '종목 분석 중 오류가 발생했습니다.';
+    state.stockResult = null;
+  } finally {
+    state.stockLoading = false;
+    renderStockTab();
+  }
+}
+
+function renderStockChart() {
+  const s = state.stockResult;
+  const canvas = document.getElementById('stockPriceChart');
+  if (!s || !canvas || typeof Chart === 'undefined') return;
+  if (state.stockChartInstance) {
+    state.stockChartInstance.destroy();
+    state.stockChartInstance = null;
+  }
+
+  const dark = isDark();
+  const rows = s.recentRows || [];
+  if (!rows.length) return;
+  const labels = rows.map(v => v[0].slice(5));
+  labels.push('다음날(예상)');
+  const closes = rows.map(v => v[1]);
+  const lastClose = closes[closes.length - 1];
+  const hiPt = Number(s.hiPrice.toFixed(2));
+  const loPt = Number(s.loPrice.toFixed(2));
+  const midPt = Number(((hiPt + loPt) / 2).toFixed(2));
+
+  const closeLine = closes.concat([null]);
+  const upperBand = new Array(rows.length - 1).fill(null).concat([lastClose, hiPt]);
+  const lowerBand = new Array(rows.length - 1).fill(null).concat([lastClose, loPt]);
+  const projLine = new Array(rows.length - 1).fill(null).concat([lastClose, midPt]);
+
+  const tickColor = dark ? '#94a3b8' : '#64748b';
+  const gridColor = dark ? 'rgba(148, 163, 184, 0.12)' : '#f1f5f9';
+
+  state.stockChartInstance = new Chart(canvas, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: '종가',
+          data: closeLine,
+          borderColor: dark ? '#2dd4bf' : '#0f766e',
+          backgroundColor: dark ? 'rgba(45, 212, 191, 0.12)' : 'rgba(15, 118, 110, 0.08)',
+          borderWidth: 2.2,
+          pointRadius: 1.5,
+          tension: 0.2
+        },
+        {
+          label: '예상 상단 (P90)',
+          data: upperBand,
+          borderColor: dark ? '#fb7185' : '#dc2626',
+          borderDash: [4, 4],
+          borderWidth: 1.5,
+          pointRadius: 3,
+          fill: false
+        },
+        {
+          label: '예상 하단 (P10)',
+          data: lowerBand,
+          borderColor: dark ? '#60a5fa' : '#2563eb',
+          borderDash: [4, 4],
+          borderWidth: 1.5,
+          pointRadius: 3,
+          fill: '-1',
+          backgroundColor: dark ? 'rgba(56, 189, 248, 0.15)' : 'rgba(14, 165, 233, 0.12)'
+        },
+        {
+          label: '중심 추정',
+          data: projLine,
+          borderColor: dark ? '#cbd5e1' : '#334155',
+          borderDash: [2, 2],
+          borderWidth: 1.5,
+          pointRadius: 3
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: {
+        legend: {
+          display: true,
+          position: 'bottom',
+          labels: { boxWidth: 10, font: { size: 11 }, color: tickColor }
+        }
+      },
+      scales: {
+        x: { ticks: { maxTicksLimit: 6, font: { size: 11 }, color: tickColor }, grid: { display: false } },
+        y: { ticks: { font: { size: 11 }, color: tickColor }, grid: { color: gridColor } }
+      }
+    }
+  });
+  triggerChartReveal('stock-chart-wrap');
+}
+
+function renderStockTab() {
+  const container = document.getElementById('stock-content');
+  if (!container) return;
+
+  const presetHtml = STOCK_PRESETS.map(p => {
+    const active =
+      state.stockResult &&
+      (state.stockResult.name === p.name || state.stockResult.symbol.startsWith(p.q));
+    return (
+      '<button type="button" data-stock-preset="' + escapeHtml(p.q) + '" data-stock-sector="' + p.sector + '" data-stock-name="' + escapeHtml(p.name) + '" class="px-2.5 py-1.5 rounded-xl text-xs font-semibold transition border whitespace-nowrap ' +
+      (active
+        ? 'bg-teal-600 text-white border-teal-500 shadow-sm'
+        : 'surface-inset text-slate-700 dark:text-slate-200 hover:border-teal-500/60') +
+      '">' +
+      escapeHtml(p.name) +
+      ' <span class="text-[10px] opacity-75">' + p.tag + '</span>' +
+      '</button>'
+    );
+  }).join('');
+
+  const sectorOptsHtml = SECTOR_OPTIONS.map(([val, lbl]) =>
+    '<option value="' + val + '"' + (state.stockSectorOverride === val ? ' selected' : '') + '>' + lbl + '</option>'
+  ).join('');
+
+  let bodyHtml = '';
+  if (!state.workerUrl) {
+    bodyHtml =
+      '<section class="mt-3 rounded-2xl surface-card p-5 text-center">' +
+      '<div class="text-sm font-bold text-slate-900 dark:text-slate-100">실시간 중계 서버(Cloudflare Workers) 연결 필요</div>' +
+      '<p class="mt-1.5 text-xs text-slate-500 dark:text-slate-400 leading-relaxed">개별 종목 2년 일봉·업종별 선행지표·종목 속보 뉴스를 실시간으로 수집하기 위해 Cloudflare Workers URL이 필요합니다. v7.0 Worker를 배포한 뒤 아래 버튼으로 주소를 저장해 주세요.</p>' +
+      '<button id="stock-goto-worker" type="button" class="mt-3 px-4 py-2 rounded-xl bg-teal-600 hover:bg-teal-500 text-white text-xs font-bold transition">Workers 주소 설정하러 가기</button>' +
+      '</section>';
+  } else if (state.stockLoading) {
+    bodyHtml =
+      '<section class="mt-3 rounded-2xl surface-card p-6 text-center">' +
+      '<div class="inline-block w-6 h-6 border-2 border-teal-500 border-t-transparent rounded-full animate-spin"></div>' +
+      '<div class="mt-2.5 text-sm font-bold text-slate-800 dark:text-slate-100">' + escapeHtml(state.stockQuery) + ' 실시간 시세·업종 선행지표 학습 중...</div>' +
+      '<div class="mt-1 text-xs text-slate-500 dark:text-slate-400">최근 2년 일봉 수집 및 워크포워드 백테스트 검증 중입니다.</div>' +
+      '</section>';
+  } else if (state.stockError) {
+    bodyHtml =
+      '<section class="mt-3 rounded-2xl surface-card p-5 text-center">' +
+      '<div class="text-sm font-bold text-rose-600 dark:text-rose-400">종목 조회 오류</div>' +
+      '<p class="mt-1.5 text-xs text-slate-600 dark:text-slate-400">' + escapeHtml(state.stockError) + '</p>' +
+      '<p class="mt-1 text-[11px] text-slate-400 dark:text-slate-500">Cloudflare Worker가 v7.0(`/stock` 지원)으로 배포되었는지 확인해 주세요.</p>' +
+      '</section>';
+  } else if (state.stockResult) {
+    const s = state.stockResult;
+    const isBull = s.p >= 0.5;
+    const heroGlow =
+      s.signal.tone === 'teal'
+        ? 'radial-gradient(circle at 18% 0%, rgba(251, 113, 133, 0.24), transparent 58%)'
+        : s.signal.tone === 'rose'
+          ? 'radial-gradient(circle at 18% 0%, rgba(56, 189, 248, 0.24), transparent 58%)'
+          : 'radial-gradient(circle at 18% 0%, rgba(45, 212, 191, 0.18), transparent 58%)';
+    const sigBadgeClass =
+      s.signal.tone === 'teal'
+        ? 'bg-rose-500/20 text-rose-200 border border-rose-400/40'
+        : s.signal.tone === 'rose'
+          ? 'bg-sky-500/20 text-sky-200 border border-sky-400/40'
+          : 'bg-slate-800/90 text-slate-300 border border-slate-700';
+    const relBadgeClass =
+      s.reliability.tone === 'teal'
+        ? 'bg-emerald-500/20 text-emerald-200 border border-emerald-400/35'
+        : s.reliability.tone === 'rose'
+          ? 'bg-rose-500/20 text-rose-200 border border-rose-400/35'
+          : 'bg-amber-500/20 text-amber-200 border border-amber-400/35';
+
+    const maxAbs = Math.max(Math.abs(s.lowPct), Math.abs(s.highPct), 2);
+    const leftBarPct = Math.min(50, (Math.max(0, -s.lowPct) / maxAbs) * 46);
+    const rightBarPct = Math.min(50, (Math.max(0, s.highPct) / maxAbs) * 46);
+    const fmtB = x => (x === null || x === undefined ? '-' : x.toFixed(4));
+
+    const contribHtml = s.contributions
+      .map(c => {
+        const pos = c.impactPct >= 0;
+        const barW = Math.min(100, Math.abs(c.impactPct) * 8);
+        return (
+          '<div class="py-2 border-b border-slate-100 dark:border-slate-800/90 last:border-b-0">' +
+          '<div class="flex items-center justify-between text-xs mb-1">' +
+          '<span class="font-medium text-slate-700 dark:text-slate-300">' +
+          escapeHtml(c.label) +
+          ' <span class="text-slate-400 dark:text-slate-500 font-normal">(' +
+          (!c.isLevel && c.value > 0 && c.key !== 'vol10' ? '+' : '') +
+          c.value.toFixed(2) + c.unit +
+          ')</span></span>' +
+          '<span class="font-bold tabular-nums ' +
+          (pos ? 'text-red-600 dark:text-rose-400' : 'text-blue-600 dark:text-sky-400') +
+          '">' + (pos ? '+' : '') + c.impactPct.toFixed(2) + '%p</span>' +
+          '</div>' +
+          '<div class="h-1.5 w-full bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden">' +
+          '<div class="h-full rounded-full ' +
+          (pos ? 'bg-red-500 dark:bg-rose-400' : 'bg-blue-500 dark:bg-sky-400') +
+          '" style="width:' + Math.max(4, barW).toFixed(1) + '%"></div>' +
+          '</div>' +
+          '</div>'
+        );
+      })
+      .join('');
+
+    const newsHtml = s.news.length
+      ? '<ul class="divide-y divide-slate-100 dark:divide-slate-800/90 text-xs">' +
+        s.news
+          .map(it => {
+            const safeUrl = /^https?:\/\//.test(it.url || '') ? it.url : '';
+            return (
+              '<li class="py-2">' +
+              (safeUrl
+                ? '<a href="' + escapeHtml(safeUrl) + '" target="_blank" rel="noopener noreferrer" class="font-medium text-slate-800 dark:text-slate-100 hover:text-teal-600 dark:hover:text-teal-300 hover:underline leading-snug block">' + escapeHtml(it.title) + '</a>'
+                : '<div class="font-medium text-slate-800 dark:text-slate-100 leading-snug">' + escapeHtml(it.title) + '</div>') +
+              (it.source ? '<div class="text-[10px] text-slate-400 dark:text-slate-500 mt-0.5">' + escapeHtml(it.source) + '</div>' : '') +
+              '</li>'
+            );
+          })
+          .join('') +
+        '</ul>'
+      : '<p class="text-xs text-slate-500 dark:text-slate-400">최근 7일 관련 뉴스가 없습니다.</p>';
+
+    bodyHtml =
+      '<div class="mt-3 lg:grid lg:grid-cols-12 lg:gap-4 lg:items-start">' +
+      '<div class="lg:col-span-6 space-y-3">' +
+      // Stock Hero
+      '<section class="rounded-2xl bg-slate-900 dark:bg-[#0d1629] text-white p-5 border border-slate-800 dark:border-slate-700/70 shadow-lg relative overflow-hidden' + boardCls(1) + '" style="background-image:' + heroGlow + '">' +
+      '<div class="flex items-center justify-between gap-2 flex-wrap">' +
+      '<div>' +
+      '<div class="text-xs font-bold text-teal-300">' + escapeHtml(s.sectorLabel) + ' 전용 모델 · ' + escapeHtml(s.symbol) + '</div>' +
+      '<div class="text-lg font-extrabold text-white mt-0.5">' + escapeHtml(s.name) + ' <span class="text-sm font-bold tabular-nums ' + (s.ret1 >= 0 ? 'text-rose-400' : 'text-sky-400') + '">' + fmtStockPrice(s.close, s.currency) + ' (' + fmtMove(s.ret1) + ')</span></div>' +
+      '</div>' +
+      '<div class="flex items-center gap-1.5 flex-wrap">' +
+      (s.isLiveIntraday ? '<span class="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-200 border border-amber-400/40 font-semibold">KIS 실시간</span>' : '') +
+      '<span class="text-[11px] px-2 py-0.5 rounded-full font-semibold ' + relBadgeClass + '">' + escapeHtml(s.reliability.label) + '</span>' +
+      '</div>' +
+      '</div>' +
+      '<div class="mt-3 flex items-center justify-between gap-3">' +
+      '<div class="text-4xl sm:text-5xl font-extrabold tracking-tight tabular-nums ' + (isBull ? 'text-rose-400' : 'text-sky-400') + '"' +
+      (state.animateBoard ? ' data-countup="1" data-target="' + (s.p * 100).toFixed(1) + '" data-decimals="1" data-suffix="%"' : '') +
+      '>' + fmtPct(s.p) + '</div>' +
+      '<div class="text-right">' +
+      '<span class="inline-block text-xs font-bold px-2.5 py-1 rounded-full ' + sigBadgeClass + '">' + s.signal.label + '</span>' +
+      '<div class="text-xs text-slate-400 mt-1.5 tabular-nums">다음 거래일 상승 확률</div>' +
+      '</div>' +
+      '</div>' +
+      '<div class="mt-4 relative h-2.5 w-full bg-slate-800 rounded-full overflow-hidden">' +
+      '<div class="absolute left-1/2 top-0 bottom-0 w-px bg-slate-500/60 z-10"></div>' +
+      '<div class="h-full rounded-full transition-all duration-700 ease-out ' + (isBull ? 'bg-gradient-to-r from-rose-500 to-rose-300' : 'bg-gradient-to-r from-blue-600 to-sky-400') + '" data-gauge-target="' + (s.p * 100).toFixed(1) + '%" style="width:' + (s.p * 100).toFixed(1) + '%"></div>' +
+      '</div>' +
+      '<div class="mt-2.5 text-[11px] text-slate-300 leading-snug">' + escapeHtml(s.reliability.desc) + '</div>' +
+      '</section>' +
+      // Stock Band Card
+      '<section class="rounded-2xl surface-card p-4 shadow-sm' + boardCls(2) + '">' +
+      '<div class="flex items-center justify-between mb-2.5">' +
+      '<h2 class="text-sm font-bold text-slate-900 dark:text-slate-100">다음 거래일 예상 가격 폭 (80% 구간)</h2>' +
+      '<span class="text-xs text-slate-500 dark:text-slate-400 tabular-nums">10일 변동성 ' + s.vol10.toFixed(2) + '%</span>' +
+      '</div>' +
+      '<div class="rounded-xl surface-inset px-3.5 py-3">' +
+      '<div class="flex items-center justify-between gap-2">' +
+      '<span class="text-xs font-medium text-slate-600 dark:text-slate-300">시나리오 밴드 (P10 ~ P90)</span>' +
+      '<span class="text-sm font-extrabold tabular-nums"><span class="text-blue-600 dark:text-sky-400">' + fmtMove(s.lowPct) + '</span> <span class="text-slate-400 font-normal">~</span> <span class="text-red-600 dark:text-rose-400">' + fmtMove(s.highPct) + '</span></span>' +
+      '</div>' +
+      '<div class="mt-2.5 relative h-3 rounded-full bg-slate-200/80 dark:bg-slate-800 overflow-hidden">' +
+      '<div class="absolute top-0 bottom-0 bg-gradient-to-l from-sky-500 to-blue-600/80 rounded-l-full bar-grow-left" style="right:50%;width:' + leftBarPct.toFixed(1) + '%"></div>' +
+      '<div class="absolute top-0 bottom-0 bg-gradient-to-r from-rose-500 to-red-500/80 rounded-r-full bar-grow-right" style="left:50%;width:' + rightBarPct.toFixed(1) + '%"></div>' +
+      '<div class="absolute left-1/2 top-0 bottom-0 w-0.5 bg-slate-700 dark:bg-slate-200 -translate-x-1/2"></div>' +
+      '</div>' +
+      '<div class="mt-1.5 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">' +
+      '<span>하단 약 <strong class="text-blue-600 dark:text-sky-300">' + fmtStockPrice(s.loPrice, s.currency) + '</strong></span>' +
+      '<span class="text-[10px]">0% 기준</span>' +
+      '<span>상단 약 <strong class="text-red-600 dark:text-rose-300">' + fmtStockPrice(s.hiPrice, s.currency) + '</strong></span>' +
+      '</div>' +
+      '</div>' +
+      '<div class="mt-2.5 grid grid-cols-2 gap-2.5">' +
+      '<div class="rounded-xl bg-red-50/80 dark:bg-rose-500/10 border border-red-100 dark:border-rose-500/20 px-3 py-2">' +
+      '<div class="text-[11px] text-red-700 dark:text-rose-300 font-medium">상승 시 중앙값</div>' +
+      '<div class="text-base font-extrabold text-red-700 dark:text-rose-400 tabular-nums mt-0.5">' + fmtMove(s.gainMed) + '</div>' +
+      '</div>' +
+      '<div class="rounded-xl bg-blue-50/80 dark:bg-sky-500/10 border border-blue-100 dark:border-sky-500/20 px-3 py-2">' +
+      '<div class="text-[11px] text-blue-700 dark:text-sky-300 font-medium">하락 시 중앙값</div>' +
+      '<div class="text-base font-extrabold text-blue-700 dark:text-sky-400 tabular-nums mt-0.5">' + fmtMove(s.lossMed) + '</div>' +
+      '</div>' +
+      '</div>' +
+      '</section>' +
+      // 30-day Stock Chart
+      '<section class="rounded-2xl surface-card p-4 shadow-sm' + boardCls(3) + '">' +
+      '<div class="flex items-center justify-between mb-2">' +
+      '<h2 class="text-sm font-bold text-slate-900 dark:text-slate-100">최근 30거래일 주가 추이 및 예상 밴드</h2>' +
+      '<span class="text-xs text-slate-500 dark:text-slate-400">기준일 ' + escapeHtml(s.date) + '</span>' +
+      '</div>' +
+      '<div id="stock-chart-wrap" class="relative h-56 overflow-hidden"><canvas id="stockPriceChart"></canvas></div>' +
+      '</section>' +
+      '</div>' +
+      // Right Column
+      '<div class="lg:col-span-6 space-y-3 mt-3 lg:mt-0">' +
+      '<section class="rounded-2xl surface-card p-4 shadow-sm' + boardCls(2) + '">' +
+      '<div class="flex items-center justify-between mb-1.5">' +
+      '<h2 class="text-sm font-bold text-slate-900 dark:text-slate-100">' + escapeHtml(s.sectorLabel) + ' 추종 지표 기여도</h2>' +
+      '<span class="text-xs text-slate-500 dark:text-slate-400">표본 ' + s.backtest.trainN + '일</span>' +
+      '</div>' +
+      '<div>' + contribHtml + '</div>' +
+      '</section>' +
+      '<section class="rounded-2xl surface-card p-4 shadow-sm' + boardCls(3) + '">' +
+      '<div class="flex items-center justify-between mb-2">' +
+      '<h2 class="text-sm font-bold text-slate-900 dark:text-slate-100">종목 워크포워드 검증 성적표</h2>' +
+      '<span class="text-xs text-slate-500 dark:text-slate-400 tabular-nums">' + s.backtest.n + '회 검증</span>' +
+      '</div>' +
+      '<div class="grid grid-cols-2 gap-2 text-xs tabular-nums">' +
+      '<div class="rounded-xl surface-inset p-3">' +
+      '<div class="text-[11px] text-slate-500 dark:text-slate-400">종목 모델 브라이어</div>' +
+      '<div class="text-lg font-extrabold text-teal-700 dark:text-teal-300 mt-0.5">' + fmtB(s.backtest.brierModel) + '</div>' +
+      '<div class="text-[10px] text-slate-400 mt-0.5">기준 모델 ' + fmtB(s.backtest.brierBase) + '</div>' +
+      '</div>' +
+      '<div class="rounded-xl surface-inset p-3">' +
+      '<div class="text-[11px] text-slate-500 dark:text-slate-400">고확신(62%↑/38%↓) 적중률</div>' +
+      '<div class="text-lg font-extrabold text-slate-900 dark:text-white mt-0.5">' + (s.backtest.hiAcc !== null ? fmtPct(s.backtest.hiAcc) : '표본 부족') + '</div>' +
+      '<div class="text-[10px] text-slate-400 mt-0.5">' + s.backtest.hiN + '회 발생 · 80%밴드 ' + fmtPct(s.backtest.cov80) + '</div>' +
+      '</div>' +
+      '</div>' +
+      '</section>' +
+      '<section class="rounded-2xl surface-card p-4 shadow-sm' + boardCls(4) + '">' +
+      '<div class="flex items-center justify-between mb-2">' +
+      '<h2 class="text-sm font-bold text-slate-900 dark:text-slate-100">' + escapeHtml(s.name) + ' 최신 속보 · 공시 체크</h2>' +
+      '<span class="text-[11px] text-slate-400">실적·공시 확인 필수</span>' +
+      '</div>' +
+      newsHtml +
+      '</section>' +
+      '</div>' +
+      '</div>';
+  } else {
+    bodyHtml =
+      '<section class="mt-3 rounded-2xl surface-card p-5 text-center text-xs text-slate-500 dark:text-slate-400">위 업종별 대장주 버튼을 누르거나 종목명·코드를 입력해 분석을 시작하세요.</section>';
+  }
+
+  container.innerHTML =
+    '<section class="rounded-2xl surface-card p-4 shadow-sm">' +
+    '<div class="flex items-center justify-between gap-2 mb-2.5 flex-wrap">' +
+    '<h2 class="text-sm font-bold text-slate-900 dark:text-slate-100">업종별 대장주 프리셋 · 개별 종목 검색</h2>' +
+    '<span class="text-[11px] text-slate-500 dark:text-slate-400">업종별 선행지표 자동 매칭</span>' +
+    '</div>' +
+    '<div class="flex flex-wrap gap-1.5 mb-3">' + presetHtml + '</div>' +
+    '<form id="stock-search-form" class="flex flex-col sm:flex-row gap-2">' +
+    '<input id="stock-query-input" type="text" value="' + escapeHtml(state.stockQuery) + '" placeholder="종목명(예: SK하이닉스), 6자리 코드(000660), 미국 티커(NVDA)" class="flex-1 text-xs rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800/90 px-3 py-2 text-slate-800 dark:text-slate-100" />' +
+    '<div class="flex gap-2">' +
+    '<select id="stock-sector-select" aria-label="추종 업종 선택" class="flex-1 sm:w-52 text-xs rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800/90 px-2.5 py-2 text-slate-800 dark:text-slate-100">' + sectorOptsHtml + '</select>' +
+    '<button type="submit" class="px-4 py-2 rounded-xl bg-teal-600 hover:bg-teal-500 text-white text-xs font-bold transition whitespace-nowrap">분석 실행</button>' +
+    '</div>' +
+    '</form>' +
+    '</section>' +
+    bodyHtml;
+
+  if (state.animateBoard && state.stockResult) {
+    runCountUps(container);
+    state.animateBoard = false;
+  }
+
+  const form = document.getElementById('stock-search-form');
+  if (form) {
+    form.addEventListener('submit', e => {
+      e.preventDefault();
+      const qVal = (document.getElementById('stock-query-input').value || '').trim();
+      const sVal = document.getElementById('stock-sector-select').value || '';
+      fetchAndAnalyzeStock(qVal, sVal);
+    });
+  }
+  const secSel = document.getElementById('stock-sector-select');
+  if (secSel) {
+    secSel.addEventListener('change', e => {
+      state.stockSectorOverride = e.target.value;
+      if (state.stockQuery && state.workerUrl) {
+        fetchAndAnalyzeStock(state.stockQuery, state.stockSectorOverride);
+      }
+    });
+  }
+  for (const btn of container.querySelectorAll('button[data-stock-preset]')) {
+    btn.addEventListener('click', () => {
+      state.stockSectorOverride = btn.dataset.stockSector || '';
+      state.stockQuery = btn.dataset.stockName || btn.dataset.stockPreset;
+      fetchAndAnalyzeStock(btn.dataset.stockPreset, state.stockSectorOverride);
+    });
+  }
+  const gotoBtn = document.getElementById('stock-goto-worker');
+  if (gotoBtn) {
+    gotoBtn.addEventListener('click', () => {
+      switchTab('backtest');
+      const inp = document.getElementById('worker-url-input');
+      if (inp) inp.focus();
+    });
+  }
+  if (state.stockResult) renderStockChart();
 }
 
 function renderAll() {

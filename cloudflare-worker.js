@@ -418,6 +418,341 @@ async function fetchDetailedChart(key, tf) {
   return [];
 }
 
+
+const SECTOR_PROFILES = {
+  semi: {
+    label: '반도체',
+    peers: [
+      { sym: '^SOX', label: '필라델피아 반도체' },
+      { sym: 'NVDA', label: '엔비디아 (NVDA)' },
+      { sym: 'MU', label: '마이크론 (MU)' },
+      { sym: 'KRW=X', label: '원/달러 환율' }
+    ]
+  },
+  battery: {
+    label: '2차전지',
+    peers: [
+      { sym: 'TSLA', label: '테슬라 (TSLA)' },
+      { sym: 'LIT', label: '리튬·배터리 ETF (LIT)' },
+      { sym: '^TNX', label: '미 국채 10년 금리', isLevel: true, unit: '%' },
+      { sym: 'KRW=X', label: '원/달러 환율' }
+    ]
+  },
+  auto: {
+    label: '자동차·수출',
+    peers: [
+      { sym: 'KRW=X', label: '원/달러 환율' },
+      { sym: '^GSPC', label: 'S&P500 지수' },
+      { sym: 'CL=F', label: 'WTI 국제유가' },
+      { sym: '^IXIC', label: '나스닥 종합' }
+    ]
+  },
+  ship: {
+    label: '조선·방산',
+    peers: [
+      { sym: 'CL=F', label: 'WTI 국제유가' },
+      { sym: 'KRW=X', label: '원/달러 환율' },
+      { sym: 'XLI', label: '미 산업재 ETF (XLI)' },
+      { sym: '^GSPC', label: 'S&P500 지수' }
+    ]
+  },
+  bio: {
+    label: '바이오·제약',
+    peers: [
+      { sym: 'XBI', label: '미 바이오 ETF (XBI)' },
+      { sym: '^IXIC', label: '나스닥 종합' },
+      { sym: '^TNX', label: '미 국채 10년 금리', isLevel: true, unit: '%' },
+      { sym: '^VIX', label: 'VIX 변동성 지수', isLevel: true, unit: 'pt' }
+    ]
+  },
+  fin: {
+    label: '금융·은행',
+    peers: [
+      { sym: '^TNX', label: '미 국채 10년 금리', isLevel: true, unit: '%' },
+      { sym: 'XLF', label: '미 금융 ETF (XLF)' },
+      { sym: '^VIX', label: 'VIX 변동성 지수', isLevel: true, unit: 'pt' },
+      { sym: '^KS11', label: '코스피 지수' }
+    ]
+  },
+  tech: {
+    label: '인터넷·AI',
+    peers: [
+      { sym: 'QQQ', label: '나스닥100 (QQQ)' },
+      { sym: '^TNX', label: '미 국채 10년 금리', isLevel: true, unit: '%' },
+      { sym: '^VIX', label: 'VIX 변동성 지수', isLevel: true, unit: 'pt' },
+      { sym: '^KS11', label: '코스피 지수' }
+    ]
+  },
+  us_semi: {
+    label: '미국 반도체·AI',
+    peers: [
+      { sym: '^SOX', label: '필라델피아 반도체' },
+      { sym: '^IXIC', label: '나스닥 종합' },
+      { sym: '^TNX', label: '미 국채 10년 금리', isLevel: true, unit: '%' },
+      { sym: '^VIX', label: 'VIX 변동성 지수', isLevel: true, unit: 'pt' }
+    ]
+  },
+  us_ev: {
+    label: '미국 전기차·성장주',
+    peers: [
+      { sym: '^IXIC', label: '나스닥 종합' },
+      { sym: 'LIT', label: '리튬·배터리 ETF (LIT)' },
+      { sym: '^TNX', label: '미 국채 10년 금리', isLevel: true, unit: '%' },
+      { sym: '^VIX', label: 'VIX 변동성 지수', isLevel: true, unit: 'pt' }
+    ]
+  },
+  general: {
+    label: '일반 대형주',
+    peers: [
+      { sym: '^IXIC', label: '나스닥 종합' },
+      { sym: '^GSPC', label: 'S&P500 지수' },
+      { sym: 'KRW=X', label: '원/달러 환율' },
+      { sym: '^VIX', label: 'VIX 변동성 지수', isLevel: true, unit: 'pt' }
+    ]
+  }
+};
+
+const KR_STOCK_DICT = {
+  'SK하이닉스': { sym: '000660.KS', code: '000660', name: 'SK하이닉스', sector: 'semi' },
+  '하이닉스': { sym: '000660.KS', code: '000660', name: 'SK하이닉스', sector: 'semi' },
+  '삼성전자': { sym: '005930.KS', code: '005930', name: '삼성전자', sector: 'semi' },
+  'LG에너지솔루션': { sym: '373220.KS', code: '373220', name: 'LG에너지솔루션', sector: 'battery' },
+  '엔솔': { sym: '373220.KS', code: '373220', name: 'LG에너지솔루션', sector: 'battery' },
+  '에코프로': { sym: '086520.KQ', code: '086520', name: '에코프로', sector: 'battery' },
+  '에코프로비엠': { sym: '247540.KQ', code: '247540', name: '에코프로비엠', sector: 'battery' },
+  '삼성SDI': { sym: '006400.KS', code: '006400', name: '삼성SDI', sector: 'battery' },
+  '포스코홀딩스': { sym: '005490.KS', code: '005490', name: 'POSCO홀딩스', sector: 'battery' },
+  '현대차': { sym: '005380.KS', code: '005380', name: '현대차', sector: 'auto' },
+  '기아': { sym: '000270.KS', code: '000270', name: '기아', sector: 'auto' },
+  'HD현대중공업': { sym: '329180.KS', code: '329180', name: 'HD현대중공업', sector: 'ship' },
+  '한화에어로스페이스': { sym: '012450.KS', code: '012450', name: '한화에어로스페이스', sector: 'ship' },
+  '한화오션': { sym: '042660.KS', code: '042660', name: '한화오션', sector: 'ship' },
+  '두산에너빌리티': { sym: '034020.KS', code: '034020', name: '두산에너빌리티', sector: 'ship' },
+  '셀트리온': { sym: '068270.KS', code: '068270', name: '셀트리온', sector: 'bio' },
+  '삼성바이오로직스': { sym: '207940.KS', code: '207940', name: '삼성바이오로직스', sector: 'bio' },
+  '알테오젠': { sym: '196170.KQ', code: '196170', name: '알테오젠', sector: 'bio' },
+  'KB금융': { sym: '105560.KS', code: '105560', name: 'KB금융', sector: 'fin' },
+  '신한지주': { sym: '055550.KS', code: '055550', name: '신한지주', sector: 'fin' },
+  '하나금융지주': { sym: '086790.KS', code: '086790', name: '하나금융지주', sector: 'fin' },
+  'NAVER': { sym: '035420.KS', code: '035420', name: 'NAVER', sector: 'tech' },
+  '네이버': { sym: '035420.KS', code: '035420', name: 'NAVER', sector: 'tech' },
+  '카카오': { sym: '035720.KS', code: '035720', name: '카카오', sector: 'tech' },
+  '카카오뱅크': { sym: '323410.KS', code: '323410', name: '카카오뱅크', sector: 'fin' },
+  '엔비디아': { sym: 'NVDA', code: '', name: 'NVIDIA (NVDA)', sector: 'us_semi' },
+  '테슬라': { sym: 'TSLA', code: '', name: 'Tesla (TSLA)', sector: 'us_ev' },
+  '애플': { sym: 'AAPL', code: '', name: 'Apple (AAPL)', sector: 'us_semi' },
+  '마이크로소프트': { sym: 'MSFT', code: '', name: 'Microsoft (MSFT)', sector: 'us_semi' },
+  '팔란티어': { sym: 'PLTR', code: '', name: 'Palantir (PLTR)', sector: 'us_semi' }
+};
+
+async function fetchYahooDaily2Y(symbol) {
+  const cache = caches.default;
+  const cKey = new Request(`https://kis-y2y-cache.internal/v700/${encodeURIComponent(symbol)}`);
+  const hit = await cache.match(cKey);
+  if (hit) {
+    try { return await hit.json(); } catch (_) {}
+  }
+  try {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=2y&interval=1d`;
+    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    if (!res.ok) return null;
+    const json = await res.json();
+    const r0 = json?.chart?.result?.[0];
+    const meta = r0?.meta || {};
+    const ts = r0?.timestamp || [];
+    const closes = r0?.indicators?.quote?.[0]?.close || [];
+    const rows = [];
+    let prevClose = null;
+    for (let i = 0; i < ts.length; i++) {
+      const c = closes[i];
+      if (!Number.isFinite(c) || c <= 0) continue;
+      const d = new Date(ts[i] * 1000 + 9 * 3600 * 1000).toISOString().slice(0, 10);
+      const pct = prevClose ? Number((((c / prevClose) - 1) * 100).toFixed(2)) : 0;
+      if (rows.length && rows[rows.length - 1][0] === d) {
+        rows[rows.length - 1] = [d, Number(c.toFixed(2)), pct];
+      } else {
+        rows.push([d, Number(c.toFixed(2)), pct]);
+      }
+      prevClose = c;
+    }
+    if (rows.length < 30) return null;
+    const out = {
+      symbol: meta.symbol || symbol,
+      name: meta.shortName || meta.longName || symbol,
+      currency: meta.currency || (symbol.endsWith('.KS') || symbol.endsWith('.KQ') ? 'KRW' : 'USD'),
+      rows
+    };
+    await cache.put(cKey, new Response(JSON.stringify(out), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'max-age=900' } }));
+    return out;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function fetchKisStockPrice(token, env, code) {
+  if (!code || !/^\d{6}$/.test(code)) return null;
+  try {
+    const url = `${KIS_BASE}/uapi/domestic-stock/v1/quotations/inquire-price?FID_COND_MRKT_DIV_CODE=J&FID_INPUT_ISCD=${code}`;
+    const res = await fetch(url, {
+      headers: {
+        'Content-Type': 'application/json; charset=UTF-8',
+        authorization: `Bearer ${token}`,
+        appkey: env.KIS_APP_KEY,
+        appsecret: env.KIS_APP_SECRET,
+        tr_id: 'FHKST01010100',
+        custtype: 'P'
+      }
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    if (json.rt_cd !== '0' || !json.output) return null;
+    const price = Number(json.output.stck_prpr);
+    const pct = Number(json.output.prdy_ctrt);
+    if (!Number.isFinite(price) || price <= 0) return null;
+    return { close: price, pct: Number.isFinite(pct) ? Number(pct.toFixed(2)) : 0 };
+  } catch (_) {
+    return null;
+  }
+}
+
+async function resolveStockTarget(rawQuery) {
+  const q = String(rawQuery || '').trim();
+  if (!q) return null;
+  const direct = KR_STOCK_DICT[q] || KR_STOCK_DICT[q.toUpperCase()];
+  if (direct) return direct;
+
+  // 6자리 국내 종목코드 직접 입력
+  if (/^\d{6}$/.test(q)) {
+    const byCode = Object.values(KR_STOCK_DICT).find(v => v.code === q);
+    if (byCode) return byCode;
+    return { sym: `${q}.KS`, altSym: `${q}.KQ`, code: q, name: q, sector: 'general' };
+  }
+  // 이미 .KS / .KQ 또는 영문 티커
+  if (/^[A-Za-z0-9.-]{1,12}$/.test(q)) {
+    const up = q.toUpperCase();
+    const isKr = up.endsWith('.KS') || up.endsWith('.KQ');
+    const code = isKr ? up.split('.')[0] : '';
+    const bySym = Object.values(KR_STOCK_DICT).find(v => v.sym === up);
+    if (bySym) return bySym;
+    return { sym: up, code, name: up, sector: isKr ? 'general' : 'us_semi' };
+  }
+  // 그 외 종목명은 Yahoo Search로 티커 조회
+  try {
+    const res = await fetch(`https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(q)}&quotesCount=5&newsCount=0`, {
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
+    if (res.ok) {
+      const j = await res.json();
+      const match = (j.quotes || []).find(it => it.symbol && (it.quoteType === 'EQUITY' || it.quoteType === 'ETF'));
+      if (match) {
+        const isKr = match.symbol.endsWith('.KS') || match.symbol.endsWith('.KQ');
+        return {
+          sym: match.symbol,
+          code: isKr ? match.symbol.split('.')[0] : '',
+          name: match.shortname || match.longname || q,
+          sector: isKr ? 'general' : 'us_semi'
+        };
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
+async function handleStockRequest(url, env, headers) {
+  const q = (url.searchParams.get('q') || '').trim();
+  const reqSector = (url.searchParams.get('sector') || '').trim();
+  const target = await resolveStockTarget(q);
+  if (!target) {
+    return new Response(JSON.stringify({ error: '종목을 찾을 수 없습니다. 종목명, 6자리 코드(예: 000660) 또는 미국 티커(예: NVDA)를 입력해 주세요.' }), { status: 404, headers });
+  }
+
+  const sectorKey = SECTOR_PROFILES[reqSector] ? reqSector : (SECTOR_PROFILES[target.sector] ? target.sector : 'general');
+  const profile = SECTOR_PROFILES[sectorKey];
+  const cache = caches.default;
+  const cKey = new Request(`https://kis-stock-cache.internal/v700/${encodeURIComponent(target.sym)}/${sectorKey}`);
+  const hit = await cache.match(cKey);
+  if (hit) return new Response(await hit.text(), { status: 200, headers });
+
+  let mainData = await fetchYahooDaily2Y(target.sym);
+  if (!mainData && target.altSym) {
+    mainData = await fetchYahooDaily2Y(target.altSym);
+  }
+  if (!mainData) {
+    return new Response(JSON.stringify({ error: `시세 데이터를 불러오지 못했습니다 (${target.sym}).` }), { status: 502, headers });
+  }
+
+  const kst = getKstNow();
+  const isKr = mainData.symbol.endsWith('.KS') || mainData.symbol.endsWith('.KQ');
+  const krCode = target.code || (isKr ? mainData.symbol.split('.')[0] : '');
+
+  const peerPromises = profile.peers.map(async p => {
+    const d = await fetchYahooDaily2Y(p.sym);
+    return d ? { sym: p.sym, label: p.label, isLevel: Boolean(p.isLevel), unit: p.unit || '%', rows: d.rows } : null;
+  });
+
+  const kisPromise = (async () => {
+    if (isKr && krCode && env.KIS_APP_KEY && env.KIS_APP_SECRET) {
+      try {
+        const token = await getKisToken(env);
+        return await fetchKisStockPrice(token, env, krCode);
+      } catch (_) {}
+    }
+    return null;
+  })();
+
+  const newsQuery = encodeURIComponent(`${target.name.split(' ')[0]} 주가 OR 실적 when:7d`);
+  const newsPromise = fetchRssPool('구글뉴스', `https://news.google.com/rss/search?q=${newsQuery}&hl=ko&gl=KR&ceid=KR:ko`, true);
+
+  const [peerResults, kisLive, rawNews] = await Promise.all([
+    Promise.all(peerPromises),
+    kisPromise,
+    newsPromise
+  ]);
+
+  const rows = mainData.rows.slice();
+  let isLiveIntraday = false;
+  if (kisLive && Number.isFinite(kisLive.close) && rows.length) {
+    const last = rows[rows.length - 1];
+    if (last[0] === kst.date) {
+      rows[rows.length - 1] = [kst.date, kisLive.close, kisLive.pct];
+      isLiveIntraday = true;
+    } else if (kst.date > last[0] && Math.abs(kisLive.close - last[1]) > 0.005) {
+      const calcPct = Number((((kisLive.close / last[1]) - 1) * 100).toFixed(2));
+      rows.push([kst.date, kisLive.close, calcPct]);
+      isLiveIntraday = true;
+    }
+  }
+
+  const news = rawNews
+    .sort((a, b) => b.pubMs - a.pubMs)
+    .slice(0, 5)
+    .map(it => {
+      const age = formatAgeKo(it.pubMs, kst.nowMs);
+      return {
+        title: it.title,
+        url: it.url,
+        source: age ? `${it.source} · ${age}` : it.source
+      };
+    });
+
+  const body = JSON.stringify({
+    symbol: mainData.symbol,
+    name: target.name !== target.code ? target.name : mainData.name,
+    currency: mainData.currency,
+    isKr,
+    isLiveIntraday,
+    updatedKst: kst.stamp,
+    sector: sectorKey,
+    sectorLabel: profile.label,
+    rows,
+    peers: peerResults.filter(Boolean),
+    news
+  });
+
+  await cache.put(cKey, new Response(body, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'max-age=120' } }));
+  return new Response(body, { status: 200, headers });
+}
+
 export default {
   async fetch(request, env) {
     const headers = corsHeaders(request);
@@ -426,6 +761,9 @@ export default {
     }
 
     const url = new URL(request.url);
+    if (url.pathname === '/stock') {
+      return handleStockRequest(url, env, headers);
+    }
     if (url.pathname === '/chart') {
       const key = (url.searchParams.get('key') || '').toUpperCase();
       const tf = url.searchParams.get('tf') || '15m';

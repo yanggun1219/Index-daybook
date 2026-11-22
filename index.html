@@ -9,7 +9,7 @@
   <link rel="apple-touch-icon" href="icon-512.png" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="지수 관측소" />
-  <title>지수 관측소 v6.0 — 다크모드 · 실시간 시세 · 국내 속보</title>
+  <title>지수 관측소 v7.0 — 다크모드 · 실시간 시세 · 국내 속보</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet" />
@@ -154,7 +154,7 @@
       <div class="min-w-0">
         <div class="flex items-center gap-1.5">
           <span class="inline-block w-2 h-2 rounded-full bg-teal-500 dark:bg-teal-400 animate-pulse"></span>
-          <span class="text-[11px] font-bold text-teal-700 dark:text-teal-400 tracking-wider uppercase">INDEX DAYBOOK V6.0</span>
+          <span class="text-[11px] font-bold text-teal-700 dark:text-teal-400 tracking-wider uppercase">INDEX DAYBOOK V7.0</span>
         </div>
         <h1 class="text-xl font-extrabold tracking-tight text-slate-900 dark:text-white leading-tight">지수 관측소</h1>
       </div>
@@ -175,13 +175,18 @@
     </div>
 
     <div id="view-tabs" role="tablist" aria-label="화면 전환" class="mt-3 flex border-b border-slate-200 dark:border-slate-800">
-      <button type="button" role="tab" data-tab="forecast" aria-selected="true">전망</button>
+      <button type="button" role="tab" data-tab="forecast" aria-selected="true">지수 전망</button>
+      <button type="button" role="tab" data-tab="stock" aria-selected="false">종목 관측</button>
       <button type="button" role="tab" data-tab="simulator" aria-selected="false">시뮬레이터</button>
       <button type="button" role="tab" data-tab="backtest" aria-selected="false">검증 · 데이터</button>
     </div>
 
     <div id="panel-forecast" class="mt-3">
       <div id="forecast-content" aria-live="polite"></div>
+    </div>
+
+    <div id="panel-stock" class="mt-3 hidden">
+      <div id="stock-content" aria-live="polite"></div>
     </div>
 
     <div id="panel-simulator" class="mt-3 hidden">
@@ -193,7 +198,7 @@
     </div>
 
     <details class="mt-4 rounded-2xl surface-card p-4 text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-      <summary class="font-bold text-slate-800 dark:text-slate-200 cursor-pointer">v6.0 모델 구조 및 면책 고지</summary>
+      <summary class="font-bold text-slate-800 dark:text-slate-200 cursor-pointer">v7.0 모델 구조 및 면책 고지</summary>
       <p class="mt-2">
         코스피·코스닥은 시간감쇠(반감기 380거래일) 정규화 로지스틱 회귀와 나스닥×VIX 비선형 상호작용을 적용합니다. 나스닥 1거래일 모델은 과적합을 줄이기 위해 강한 L2 정규화로 분리하고, 미국 개장 전 마감한 한국장(코스피) 독자 변동분과 VIX/VIX3M 기간구조·유럽 DAX를 반영합니다. 고확신 구간은 코스피·코스닥 65%/35%, 나스닥 60%/40% 기준으로 선별 검증하며 표본이 20일 미만이면 관망으로 표시합니다.
       </p>

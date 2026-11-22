@@ -738,3 +738,261 @@ function applyKrFuturesOverlay(forecast, krFutPct, krBasis, marketKey, enabled) 
     ])
   };
 }
+
+// ============================================================
+// v7.0 개별 종목 업종별 선행지표 기반 실시간 예측 + 워크포워드 검증 엔진
+// ============================================================
+function fitStockLogistic(X, y, weights, lambda) {
+  const n = X.length;
+  const d = X[0].length;
+  const mean = new Array(d).fill(0);
+  const std = new Array(d).fill(1);
+  let wSum = 0;
+  for (let i = 0; i < n; i++) wSum += weights[i];
+  for (let j = 0; j < d; j++) {
+    let m = 0;
+    for (let i = 0; i < n; i++) m += weights[i] * X[i][j];
+    mean[j] = m / (wSum || 1);
+    let v = 0;
+    for (let i = 0; i < n; i++) v += weights[i] * (X[i][j] - mean[j]) ** 2;
+    std[j] = Math.sqrt(v / (wSum || 1)) || 1;
+  }
+
+  let b = 0;
+  const w = new Array(d).fill(0);
+  const lr = 0.12;
+  for (let iter = 0; iter < 90; iter++) {
+    let gb = 0;
+    const gw = new Array(d).fill(0);
+    for (let i = 0; i < n; i++) {
+      let z = b;
+      for (let j = 0; j < d; j++) z += w[j] * ((X[i][j] - mean[j]) / std[j]);
+      const p = 1 / (1 + Math.exp(-Math.max(-20, Math.min(20, z))));
+      const err = (p - y[i]) * weights[i];
+      gb += err;
+      for (let j = 0; j < d; j++) gw[j] += err * ((X[i][j] - mean[j]) / std[j]);
+    }
+    b -= (lr * gb) / (wSum || 1);
+    for (let j = 0; j < d; j++) {
+      w[j] -= (lr * (gw[j] + (lambda * w[j]) / n)) / (wSum || 1);
+    }
+  }
+  return { b, w, mean, std };
+}
+
+function predictStockRow(model, feat) {
+  let z = model.b;
+  const contribZ = [];
+  for (let j = 0; j < feat.length; j++) {
+    const cz = model.w[j] * ((feat[j] - model.mean[j]) / model.std[j]);
+    z += cz;
+    contribZ.push(cz);
+  }
+  const p = 1 / (1 + Math.exp(-Math.max(-20, Math.min(20, z))));
+  const baseP = 1 / (1 + Math.exp(-Math.max(-20, Math.min(20, model.b))));
+  const sumZ = contribZ.reduce((s, v) => s + v, 0);
+  const scale = Math.abs(sumZ) > 1e-6 ? ((p - baseP) * 100) / sumZ : 0;
+  return { p, contribPct: contribZ.map(cz => cz * scale) };
+}
+
+function lookupPeerVal(peerRows, targetDate, strictBefore, isLevel) {
+  if (!Array.isArray(peerRows) || !peerRows.length) return null;
+  let lo = 0;
+  let hi = peerRows.length - 1;
+  let ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const d = peerRows[mid][0];
+    if (strictBefore ? d < targetDate : d <= targetDate) {
+      ans = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  if (ans < 0) return null;
+  return isLevel ? peerRows[ans][1] : peerRows[ans][2];
+}
+
+function analyzeIndividualStock(payload) {
+  const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+  if (rows.length < 60) {
+    return { error: '분석에 필요한 일봉 데이터가 부족합니다 (최소 60거래일 필요).' };
+  }
+  const isKr = Boolean(payload.isKr);
+  const peers = Array.isArray(payload.peers) ? payload.peers : [];
+
+  const meta = [
+    { key: 'ret1', label: '종목 당일 등락률', unit: '%' },
+    { key: 'ret5', label: '종목 5일 모멘텀', unit: '%' },
+    { key: 'vol10', label: '10일 실현 변동성', unit: '%' }
+  ];
+  for (const pr of peers) {
+    meta.push({
+      key: pr.sym,
+      label: pr.label,
+      unit: pr.isLevel ? (pr.unit || '') : '%',
+      isLevel: Boolean(pr.isLevel)
+    });
+  }
+
+  const samples = [];
+  for (let i = 10; i < rows.length; i++) {
+    const curDate = rows[i][0];
+    const ret1 = rows[i][2];
+    const ret5 = rows[i - 5][1] > 0 ? ((rows[i][1] / rows[i - 5][1]) - 1) * 100 : 0;
+    const wRets = [];
+    for (let k = i - 9; k <= i; k++) wRets.push(rows[k][2]);
+    const meanR = wRets.reduce((s, v) => s + v, 0) / wRets.length;
+    const vol10 = Math.sqrt(wRets.reduce((s, v) => s + (v - meanR) ** 2, 0) / wRets.length) || 1;
+
+    const feat = [ret1, ret5, vol10];
+    let ok = true;
+    for (const pr of peers) {
+      // 한국 종목은 개장 전 마감된 미국/글로벌 전일 종가만 참조 (strictBefore = true), 미국 종목은 당일 종가 참조
+      const strictBefore = isKr && pr.sym !== '^KS11' && pr.sym !== '^KQ11';
+      const pv = lookupPeerVal(pr.rows, curDate, strictBefore, pr.isLevel);
+      if (!Number.isFinite(pv)) {
+        ok = false;
+        break;
+      }
+      feat.push(pv);
+    }
+    if (!ok) continue;
+
+    const nextRet = i + 1 < rows.length && rows[i][1] > 0 ? ((rows[i + 1][1] / rows[i][1]) - 1) * 100 : null;
+    samples.push({ idx: i, date: curDate, close: rows[i][1], ret1, vol10, feat, nextRet });
+  }
+
+  if (samples.length < 55) {
+    return { error: '선행지표와 날짜가 매칭되는 표본이 부족합니다.' };
+  }
+
+  const trainAll = samples.filter(s => s.nextRet !== null);
+  const latest = samples[samples.length - 1];
+  const halfLife = 260;
+  const lambda = 35;
+
+  // 1. 확장 윈도우 워크포워드 백테스트 (과적합 방지, 10거래일마다 재학습)
+  const warmup = Math.min(80, Math.floor(trainAll.length * 0.45));
+  let curModel = null;
+  let brierSum = 0;
+  let baseBrierSum = 0;
+  let covSum = 0;
+  let evalN = 0;
+  let hiN = 0;
+  let hiHit = 0;
+  let hiBrierSum = 0;
+
+  for (let t = warmup; t < trainAll.length; t++) {
+    if (!curModel || (t - warmup) % 10 === 0) {
+      const slice = trainAll.slice(0, t);
+      const X = slice.map(s => s.feat);
+      const y = slice.map(s => (s.nextRet > 0 ? 1 : 0));
+      const w = slice.map((_, k) => Math.pow(0.5, (slice.length - 1 - k) / halfLife));
+      curModel = fitStockLogistic(X, y, w, lambda);
+    }
+    const s = trainAll[t];
+    const pred = predictStockRow(curModel, s.feat);
+    const actualUp = s.nextRet > 0 ? 1 : 0;
+    const upRate = trainAll.slice(0, t).reduce((a, v) => a + (v.nextRet > 0 ? 1 : 0), 0) / t;
+    brierSum += (pred.p - actualUp) ** 2;
+    baseBrierSum += (upRate - actualUp) ** 2;
+    const bandLo = -1.2816 * s.vol10;
+    const bandHi = 1.2816 * s.vol10;
+    if (s.nextRet >= bandLo && s.nextRet <= bandHi) covSum += 1;
+    evalN += 1;
+    if (pred.p >= 0.62 || pred.p <= 0.38) {
+      hiN += 1;
+      if ((pred.p >= 0.5) === (s.nextRet > 0)) hiHit += 1;
+      hiBrierSum += (pred.p - actualUp) ** 2;
+    }
+  }
+
+  // 2. 전체 최신 표본으로 최종 내일 예측 모델 학습
+  const Xall = trainAll.map(s => s.feat);
+  const yall = trainAll.map(s => (s.nextRet > 0 ? 1 : 0));
+  const wall = trainAll.map((_, k) => Math.pow(0.5, (trainAll.length - 1 - k) / halfLife));
+  const finalModel = fitStockLogistic(Xall, yall, wall, lambda);
+  const out = predictStockRow(finalModel, latest.feat);
+
+  const upRets = trainAll.filter(s => s.nextRet > 0).map(s => s.nextRet).sort((a, b) => a - b);
+  const dnRets = trainAll.filter(s => s.nextRet <= 0).map(s => s.nextRet).sort((a, b) => a - b);
+  const med = arr => (arr.length ? arr[Math.floor(arr.length / 2)] : 0);
+  const gainMed = med(upRets);
+  const lossMed = med(dnRets);
+  const baseUp = yall.reduce((a, v) => a + v, 0) / (yall.length || 1);
+
+  // 80% 시나리오 밴드 (변동성 기반 + 확률 중심 이동)
+  const drift = (out.p - 0.5) * latest.vol10 * 0.6;
+  const lowPct = Number((drift - 1.2816 * latest.vol10).toFixed(2));
+  const highPct = Number((drift + 1.2816 * latest.vol10).toFixed(2));
+  const loPrice = latest.close * (1 + lowPct / 100);
+  const hiPrice = latest.close * (1 + highPct / 100);
+
+  const brierModel = evalN ? brierSum / evalN : null;
+  const brierBase = evalN ? baseBrierSum / evalN : null;
+  const edge = brierModel !== null && brierBase !== null ? brierBase - brierModel : 0;
+
+  let reliability = { label: '중립 (보조 참고)', tone: 'amber', desc: '과거 기준 빈도와 유사한 수준입니다. 종목 공시·수급을 함께 확인하세요.' };
+  if (edge > 0.004) {
+    reliability = { label: '선행지표 설명력 양호', tone: 'teal', desc: '과거 워크포워드 검증에서 단순 기준 모델보다 우수한 확률 오차를 기록했습니다.' };
+  } else if (edge <= -0.003) {
+    reliability = { label: '고유 변동성 큼 (공시·수급 주의)', tone: 'rose', desc: '거시·업종 지표보다 실적·공시·수급 영향이 큰 종목입니다. 참고용으로만 보세요.' };
+  }
+
+  let signal = { label: '중립 · 관망 구간', tone: 'slate' };
+  if (out.p >= 0.62) signal = { label: '고확신 상승 우위', tone: 'teal' };
+  else if (out.p <= 0.38) signal = { label: '고확신 하락 경계', tone: 'rose' };
+
+  const contributions = meta
+    .map((m, idx) => ({
+      key: m.key,
+      label: m.label,
+      value: latest.feat[idx],
+      unit: m.unit,
+      isLevel: Boolean(m.isLevel),
+      impactPct: out.contribPct[idx] || 0
+    }))
+    .sort((a, b) => Math.abs(b.impactPct) - Math.abs(a.impactPct));
+
+  return {
+    symbol: payload.symbol,
+    name: payload.name,
+    sector: payload.sector,
+    sectorLabel: payload.sectorLabel,
+    currency: payload.currency || (isKr ? 'KRW' : 'USD'),
+    isKr,
+    isLiveIntraday: Boolean(payload.isLiveIntraday),
+    updatedKst: payload.updatedKst || '',
+    date: latest.date,
+    close: latest.close,
+    ret1: latest.ret1,
+    vol10: latest.vol10,
+    p: out.p,
+    down: 1 - out.p,
+    score: Math.round(out.p * 100),
+    base: baseUp,
+    lowPct,
+    highPct,
+    loPrice,
+    hiPrice,
+    gainMed,
+    lossMed,
+    signal,
+    reliability,
+    contributions,
+    recentRows: rows.slice(-30),
+    news: Array.isArray(payload.news) ? payload.news : [],
+    backtest: {
+      n: evalN,
+      trainN: trainAll.length,
+      brierModel,
+      brierBase,
+      cov80: evalN ? covSum / evalN : null,
+      hiN,
+      hiAcc: hiN >= 15 ? hiHit / hiN : null,
+      hiBrier: hiN >= 15 ? hiBrierSum / hiN : null
+    }
+  };
+}
