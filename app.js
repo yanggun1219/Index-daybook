@@ -1,4 +1,4 @@
-// 지수 관측소 v5.0 — 듀얼 호라이즌(1일·5일) + 고확신 신호 필터 + 선물·원자재·뉴스 모바일 앱
+// 지수 관측소 v5.1 — 듀얼 호라이즌(1일·5일) + 고확신 신호 필터 + 선물·원자재·뉴스 모바일 앱
 
 const MARKET_NAMES = {
   KOSPI: '코스피',
@@ -415,7 +415,7 @@ function renderForecast() {
     MARKET_NAMES[state.key] +
     ' ' +
     horizonLabel +
-    ' (v5.0)</span>' +
+    ' (v5.1)</span>' +
     '<div class="flex items-center gap-1.5">' +
     (state.isLiveIntraday ? '<span class="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/25 text-amber-200 border border-amber-400/40 font-semibold">장중 실시간 잠정</span>' : '') +
     '<span class="text-[11px] px-2 py-0.5 rounded-full ' +
@@ -904,7 +904,7 @@ function renderBacktest() {
     '</tr></thead>' +
     '<tbody class="divide-y divide-slate-100 tabular-nums">' +
     '<tr class="bg-teal-50/50 font-semibold text-slate-900">' +
-    '<td class="py-2.5 pr-2">개선 v5.0 (시장별 전용 엔진)</td>' +
+    '<td class="py-2.5 pr-2">개선 v5.1 (시장별 전용 엔진)</td>' +
     '<td class="py-2.5 px-2 text-right text-teal-800">' +
     fmtB(brierV4) +
     '</td>' +
@@ -1003,7 +1003,7 @@ function handleFileImport(event) {
         validateImport(parsed);
         state.marketsData = { ...state.marketsData, ...parsed };
         recomputeMarket(state.key, false);
-        showToast('데이터를 반영해 v5.0 전체 모델을 재계산했습니다.');
+        showToast('데이터를 반영해 v5.1 전체 모델을 재계산했습니다.');
       } else {
         const lines = text
           .split(/\r?\n/)
@@ -1036,10 +1036,11 @@ function renderAll() {
 }
 
 
-async function fetchLiveSnapshot() {
+async function fetchLiveSnapshot(isAuto) {
   const btn = document.getElementById('live-fetch-btn');
   let baseUrl = (state.workerUrl || '').trim().replace(/\/+$/, '');
   if (!baseUrl) {
+    if (isAuto) return;
     switchTab('backtest');
     const inp = document.getElementById('worker-url-input');
     if (inp) inp.focus();
@@ -1058,6 +1059,9 @@ async function fetchLiveSnapshot() {
 
     if (data.futures && typeof data.futures === 'object') {
       state.marketsData.FUTURES = { ...(state.marketsData.FUTURES || {}), ...data.futures };
+    }
+    if (data.news && Array.isArray(data.news.items) && data.news.items.length) {
+      state.marketsData.NEWS = data.news;
     }
 
     const dateKst = data.dateKst;
@@ -1080,7 +1084,7 @@ async function fetchLiveSnapshot() {
     state.liveUpdatedKst = data.updatedKst || '';
     recomputeMarket(state.key, false);
     const warnMsg = data.warnings && data.warnings.length ? ' (' + data.warnings[0] + ')' : '';
-    showToast('실시간 시세를 반영해 확률을 재계산했습니다.' + warnMsg);
+    if (!isAuto) showToast('실시간 시세와 글로벌 뉴스를 반영했습니다.' + warnMsg);
   } catch (err) {
     showToast('실시간 조회 실패: ' + err.message, true);
   } finally {
@@ -1139,9 +1143,10 @@ function initApp() {
   });
 
   const liveBtn = document.getElementById('live-fetch-btn');
-  if (liveBtn) liveBtn.addEventListener('click', fetchLiveSnapshot);
+  if (liveBtn) liveBtn.addEventListener('click', () => fetchLiveSnapshot(false));
   recomputeMarket('KOSPI', false);
   switchTab('forecast');
+  if (state.workerUrl) fetchLiveSnapshot(true);
 }
 
 document.addEventListener('DOMContentLoaded', initApp);

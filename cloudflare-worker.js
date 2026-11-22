@@ -1,20 +1,12 @@
-/**
- * 지수 관측소 v5.0 — Cloudflare Workers 실시간 중계 서버
- *
- * [Cloudflare 대시보드 설정 방법]
- * 1. Workers & Pages -> Create Worker -> 이 파일 전체 붙여넣기 -> Deploy
- * 2. Worker Settings -> Variables and Secrets -> Add (Type: Secret)
- *    - KIS_APP_KEY    : 한국투자증권 실전투자 App Key
- *    - KIS_APP_SECRET : 한국투자증권 실전투자 App Secret
- *    - (선택) KIS_FUTURES_CODE : 특정 코스피200 선물 단축코드 수동 지정 시
- */
-
 const KIS_BASE = 'https://openapi.koreainvestment.com:9443';
 const ALLOWED_ORIGINS = [
   'https://yanggun1219.github.io',
   'http://localhost:8000',
   'http://127.0.0.1:8000'
 ];
+
+const POS_WORDS = ['rally', 'surge', 'gain', 'rise', 'jump', 'beat', 'cut', 'dovish', 'cooling', 'growth', 'record', 'up', 'rebound', '상승', '반등', '호조', '강세', '완화'];
+const NEG_WORDS = ['drop', 'fall', 'plunge', 'slump', 'crash', 'fear', 'inflation', 'hawkish', 'tariff', 'war', 'risk', 'down', 'selloff', '하락', '급락', '우려', '약세', '관세', '충격'];
 
 function corsHeaders(request) {
   const origin = request.headers.get('Origin') || '';
@@ -61,7 +53,6 @@ async function getKisToken(env) {
   const data = await res.json();
   if (!data.access_token) throw new Error('KIS access_token missing');
 
-  // 20시간 캐싱 (1분당 1회 발급 제한 보호)
   await cache.put(
     cacheKey,
     new Response(JSON.stringify({ access_token: data.access_token }), {
@@ -169,6 +160,63 @@ async function fetchYahooQuote(symbol) {
   }
 }
 
+function cleanXmlText(s) {
+  return String(s || '')
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .trim();
+}
+
+async function fetchLiveNews(kst) {
+  const feeds = [
+    ['Yahoo Finance', 'https://finance.yahoo.com/news/rssindex'],
+    ['Google News 경제', 'https://news.google.com/rss/search?q=NASDAQ+OR+KOSPI+OR+Fed+OR+oil&hl=en-US&gl=US&ceid=US:en']
+  ];
+  const items = [];
+  const seen = new Set();
+
+  for (const [source, url] of feeds) {
+    if (items.length >= 6) break;
+    try {
+      const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+      if (!res.ok) continue;
+      const xml = await res.text();
+      const blocks = xml.match(/<item\b[\s\S]*?<\/item>/gi) || [];
+      for (const blk of blocks) {
+        const tm = blk.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i);
+        const lm = blk.match(/<link\b[^>]*>([\s\S]*?)<\/link>/i);
+        const title = cleanXmlText(tm ? tm[1] : '');
+        const link = cleanXmlText(lm ? lm[1] : '');
+        if (!title || seen.has(title)) continue;
+        seen.add(title);
+        items.push({ title, url: link, source });
+        if (items.length >= 6) break;
+      }
+    } catch (_) {
+      continue;
+    }
+  }
+
+  let pos = 0;
+  let neg = 0;
+  for (const it of items) {
+    const low = it.title.toLowerCase();
+    for (const w of POS_WORDS) if (low.includes(w)) pos++;
+    for (const w of NEG_WORDS) if (low.includes(w)) neg++;
+  }
+  const total = pos + neg;
+  const sentiment = total ? Math.round(((pos - neg) / total) * 100) : 0;
+  return {
+    updatedKst: kst.stamp,
+    sentiment,
+    items: items.slice(0, 5)
+  };
+}
+
 export default {
   async fetch(request, env) {
     const headers = corsHeaders(request);
@@ -181,9 +229,8 @@ export default {
       return new Response(JSON.stringify({ error: 'Not Found' }), { status: 404, headers });
     }
 
-    // 60초 응답 캐시 (연타 방지)
     const cache = caches.default;
-    const respCacheKey = new Request('https://kis-live-cache.internal/v1/live');
+    const respCacheKey = new Request('https://kis-live-cache.internal/v51/live');
     const cachedResp = await cache.match(respCacheKey);
     if (cachedResp) {
       const body = await cachedResp.text();
@@ -195,33 +242,36 @@ export default {
     const futures = { updatedKst: kst.stamp };
     const warnings = [];
 
-    // 1) KIS 실전투자 API 조회
-    if (env.KIS_APP_KEY && env.KIS_APP_SECRET) {
-      try {
-        const token = await getKisToken(env);
-        const [kospi, kosdaq, k200] = await Promise.all([
-          fetchKisIndex(token, env, '0001'),
-          fetchKisIndex(token, env, '1001'),
-          fetchKisFutures(token, env, kst)
-        ]);
-        if (kospi) indices.KOSPI = kospi;
-        if (kosdaq) indices.KOSDAQ = kosdaq;
-        if (k200) Object.assign(futures, k200);
-      } catch (err) {
-        warnings.push(`KIS 조회 지연: ${err.message}`);
+    const kisPromise = (async () => {
+      if (env.KIS_APP_KEY && env.KIS_APP_SECRET) {
+        try {
+          const token = await getKisToken(env);
+          const [kospi, kosdaq, k200] = await Promise.all([
+            fetchKisIndex(token, env, '0001'),
+            fetchKisIndex(token, env, '1001'),
+            fetchKisFutures(token, env, kst)
+          ]);
+          if (kospi) indices.KOSPI = kospi;
+          if (kosdaq) indices.KOSDAQ = kosdaq;
+          if (k200) Object.assign(futures, k200);
+        } catch (err) {
+          warnings.push(`KIS 조회 지연: ${err.message}`);
+        }
+      } else {
+        warnings.push('KIS Secret 미설정');
       }
-    } else {
-      warnings.push('KIS Secret 미설정');
-    }
+    })();
 
-    // 2) 해외 선물·원자재·환율 조회 (야후 파이낸스)
-    const [nq, es, cl, gc, krw] = await Promise.all([
+    const [_, nq, es, cl, gc, krw, news] = await Promise.all([
+      kisPromise,
       fetchYahooQuote('NQ=F'),
       fetchYahooQuote('ES=F'),
       fetchYahooQuote('CL=F'),
       fetchYahooQuote('GC=F'),
-      fetchYahooQuote('KRW=X')
+      fetchYahooQuote('KRW=X'),
+      fetchLiveNews(kst)
     ]);
+
     if (nq) { futures.NQ = nq.price; futures.NQ_pct = nq.pct; }
     if (es) { futures.ES = es.price; futures.ES_pct = es.pct; }
     if (cl) { futures.CL = cl.price; futures.CL_pct = cl.pct; }
@@ -233,6 +283,7 @@ export default {
       updatedKst: kst.stamp,
       indices,
       futures,
+      news,
       warnings
     });
 
