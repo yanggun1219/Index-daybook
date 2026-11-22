@@ -271,12 +271,14 @@ async function fetchRssPool(source, url, isEnglish) {
       const tm = blk.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i);
       const lm = blk.match(/<link\b[^>]*>([\s\S]*?)<\/link>/i);
       const dm = blk.match(/<description\b[^>]*>([\s\S]*?)<\/description>/i);
-      const pm = blk.match(/<pubDate\b[^>]*>([\s\S]*?)<\/pubDate>/i);
+      const pm = blk.match(/<(?:pubDate|dc:date|updated)\b[^>]*>([\s\S]*?)<\/(?:pubDate|dc:date|updated)>/i);
       const title = cleanXmlText(tm ? tm[1] : '');
       const link = cleanXmlText(lm ? lm[1] : '');
       let summary = cleanXmlText(dm ? dm[1] : '');
       if (summary.length > 96) summary = summary.slice(0, 95) + '…';
-      const pubMs = pm ? Date.parse(cleanXmlText(pm[1])) : 0;
+      let rawDate = pm ? cleanXmlText(pm[1]) : '';
+      if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}/.test(rawDate)) rawDate = rawDate.replace(' ', 'T') + '+09:00';
+      const pubMs = rawDate ? Date.parse(rawDate) : 0;
       if (!title) continue;
       out.push({ title, summary, url: link, source, pubMs: Number.isFinite(pubMs) ? pubMs : 0, isEnglish });
     }
@@ -304,19 +306,25 @@ async function fetchYahooNewsPool() {
 }
 
 async function fetchLiveNews(kst) {
-  const [yna, hk, mk, ed, gnKr, wsj, mw, cnbc, yh] = await Promise.all([
+  const [sed, nws, fnn, yna, hk, mk, ed, gnKr, wsj, mw, cnbc, yh] = await Promise.all([
+    fetchRssPool('서울경제', 'https://m.sedaily.com/rss/newsall', false),
+    fetchRssPool('뉴시스', 'https://www.newsis.com/RSS/economy.xml', false),
+    fetchRssPool('파이낸셜뉴스', 'https://www.fnnews.com/rss/r20/fn_realnews_stock.xml', false),
     fetchRssPool('연합뉴스', 'https://www.yna.co.kr/rss/economy.xml', false),
     fetchRssPool('한국경제', 'https://www.hankyung.com/feed/finance', false),
     fetchRssPool('매일경제', 'https://www.mk.co.kr/rss/50200011/', false),
     fetchRssPool('이데일리', 'https://rss.edaily.co.kr/economy_news.xml', false),
-    fetchRssPool('구글뉴스 증시', 'https://news.google.com/rss/search?q=%EC%BD%94%EC%8A%A4%ED%94%BC+OR+%EB%82%98%EC%8A%A4%EB%8B%A5+OR+%EC%97%B0%EC%A4%80+when:1d&hl=ko&gl=KR&ceid=KR:ko', false),
+    fetchRssPool('구글뉴스 증시', 'https://news.google.com/rss/search?q=%EC%BD%94%EC%8A%A4%ED%94%BC+OR+%EB%82%98%EC%8A%A4%EB%8B%A5+OR+%EC%A6%9D%EC%8B%9C+when:1d&hl=ko&gl=KR&ceid=KR:ko', false),
     fetchRssPool('WSJ', 'https://feeds.content.dowjones.io/public/rss/RSSMarketsMain', true),
     fetchRssPool('MarketWatch', 'https://feeds.content.dowjones.io/public/rss/mw_topstories', true),
     fetchRssPool('CNBC', 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664', true),
     fetchYahooNewsPool()
   ]);
 
-  const all = [...yna, ...hk, ...mk, ...ed, ...gnKr, ...wsj, ...mw, ...cnbc, ...yh].sort((a, b) => b.pubMs - a.pubMs);
+  // 서울경제 전체 피드는 증시·경제 키워드만 필터링해 잡뉴스 제외
+  const ecoRe = /코스피|코스닥|나스닥|증시|주가|선물|환율|금리|연준|반도체|삼성|하이닉스|외국인|공매도|유가|비트코인|경제|금융|채권|ETF|미국|뉴욕|관세|자사주|펀드/;
+  const sedFiltered = sed.filter(it => ecoRe.test(it.title));
+  const all = [...sedFiltered, ...nws, ...fnn, ...yna, ...hk, ...mk, ...ed, ...gnKr, ...wsj, ...mw, ...cnbc, ...yh].sort((a, b) => b.pubMs - a.pubMs);
   const picked = [];
   const seen = new Set();
   // 매체 제한 없이 9개 언론사 통합 순수 최신 속보순 상위 15건 선별
@@ -375,9 +383,9 @@ async function fetchLiveNews(kst) {
 
 async function fetchDetailedChart(key, tf) {
   const tfMap = {
-    '15m': { range: '2d', interval: '15m', binInt: '15m', limit: 64 },
-    '1h':  { range: '5d', interval: '60m', binInt: '1h',  limit: 72 },
-    '1d':  { range: '1mo', interval: '1d', binInt: '1d',  limit: 30 }
+    '15m': { range: '5d', interval: '15m', binInt: '15m', limit: 64 },
+    '1h':  { range: '1mo', interval: '60m', binInt: '1h', limit: 72 },
+    '1d':  { range: '3mo', interval: '1d', binInt: '1d',  limit: 60 }
   };
   const cfg = tfMap[tf] || tfMap['15m'];
 
@@ -402,36 +410,38 @@ async function fetchDetailedChart(key, tf) {
     } catch (_) {}
   }
 
-  const symMap = { NQ: 'NQ=F', ES: 'ES=F', CL: 'CL=F', GC: 'GC=F', BTC: 'BTC-USD', K200: '^KS200' };
-  const sym = symMap[key];
-  if (!sym) return [];
-  try {
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?range=${cfg.range}&interval=${cfg.interval}`;
-    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    if (!res.ok) return [];
-    const json = await res.json();
-    const r0 = json?.chart?.result?.[0];
-    const ts = r0?.timestamp || [];
-    const q = r0?.indicators?.quote?.[0] || {};
-    const closes = q.close || [];
-    const highs = q.high || [];
-    const lows = q.low || [];
-    const out = [];
-    for (let i = 0; i < ts.length; i++) {
-      const c = closes[i];
-      if (!Number.isFinite(c)) continue;
-      const kst = new Date(ts[i] * 1000 + 9 * 3600 * 1000);
-      const lbl = tf === '1d'
-        ? kst.toISOString().slice(5, 10)
-        : `${kst.toISOString().slice(5, 10)} ${kst.toISOString().slice(11, 16)}`;
-      const h = Number.isFinite(highs[i]) ? Number(highs[i].toFixed(2)) : Number(c.toFixed(2));
-      const l = Number.isFinite(lows[i]) ? Number(lows[i].toFixed(2)) : Number(c.toFixed(2));
-      out.push([lbl, Number(c.toFixed(2)), h, l]);
+  const symListMap = { NQ: ['NQ=F'], ES: ['ES=F'], CL: ['CL=F'], GC: ['GC=F'], BTC: ['BTC-USD'], K200: ['^KS200', '^KS11'] };
+  const syms = symListMap[key] || [];
+  for (const sym of syms) {
+    try {
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?range=${cfg.range}&interval=${cfg.interval}`;
+      const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+      if (!res.ok) continue;
+      const json = await res.json();
+      const r0 = json?.chart?.result?.[0];
+      const ts = r0?.timestamp || [];
+      const q = r0?.indicators?.quote?.[0] || {};
+      const closes = q.close || [];
+      const highs = q.high || [];
+      const lows = q.low || [];
+      const out = [];
+      for (let i = 0; i < ts.length; i++) {
+        const c = closes[i];
+        if (!Number.isFinite(c)) continue;
+        const kst = new Date(ts[i] * 1000 + 9 * 3600 * 1000);
+        const lbl = tf === '1d'
+          ? kst.toISOString().slice(5, 10)
+          : `${kst.toISOString().slice(5, 10)} ${kst.toISOString().slice(11, 16)}`;
+        const h = Number.isFinite(highs[i]) ? Number(highs[i].toFixed(2)) : Number(c.toFixed(2));
+        const l = Number.isFinite(lows[i]) ? Number(lows[i].toFixed(2)) : Number(c.toFixed(2));
+        out.push([lbl, Number(c.toFixed(2)), h, l]);
+      }
+      if (out.length) return out.slice(-cfg.limit);
+    } catch (_) {
+      continue;
     }
-    return out.slice(-cfg.limit);
-  } catch (_) {
-    return [];
   }
+  return [];
 }
 
 export default {
@@ -446,7 +456,7 @@ export default {
       const key = (url.searchParams.get('key') || '').toUpperCase();
       const tf = url.searchParams.get('tf') || '15m';
       const cache = caches.default;
-      const cKey = new Request(`https://kis-chart-cache.internal/v56/${key}/${tf}`);
+      const cKey = new Request(`https://kis-chart-cache.internal/v59/${key}/${tf}`);
       const hit = await cache.match(cKey);
       if (hit) return new Response(await hit.text(), { status: 200, headers });
       const points = await fetchDetailedChart(key, tf);
@@ -459,7 +469,7 @@ export default {
     }
 
     const cache = caches.default;
-    const respCacheKey = new Request('https://kis-live-cache.internal/v58/live');
+    const respCacheKey = new Request('https://kis-live-cache.internal/v59/live');
     const cachedResp = await cache.match(respCacheKey);
     if (cachedResp) {
       const body = await cachedResp.text();
