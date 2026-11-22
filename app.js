@@ -1,4 +1,4 @@
-// 지수 관측소 v5.5 — 듀얼 호라이즌(1일·5일) + 고확신 신호 필터 + 선물·원자재·뉴스 모바일 앱
+// 지수 관측소 v5.6 — 듀얼 호라이즌(1일·5일) + 고확신 신호 필터 + 선물·원자재·뉴스 모바일 앱
 
 const MARKET_NAMES = {
   KOSPI: '코스피',
@@ -12,6 +12,7 @@ const state = {
   horizon: 1, // 1 = 다음 거래일, 5 = 향후 5거래일(1주 추세)
   tab: 'forecast',
   dateIdx: -1,
+  latestValidIdx: -1,
   currentForecast: null,
   historyV4: null,
   historyV2: null,
@@ -26,6 +27,8 @@ const state = {
   workerUrl: (typeof localStorage !== 'undefined' && localStorage.getItem('daybook_worker_url')) || '',
   newsExpanded: false,
   selectedFutChart: null,
+  futChartTf: '15m',
+  futChartCache: {},
   futChartInstance: null,
   chartInstance: null
 };
@@ -103,13 +106,18 @@ function recomputeMarket(id, keepDate) {
         latestValid = i;
       }
     }
+    state.latestValidIdx = latestValid;
     state.dateIdx = latestValid;
     if (latestValid >= 0) dateSel.value = String(latestValid);
+  } else {
+    let lv = -1;
+    for (let i = 24; i < rows.length; i++) if (adjacent(rows[i - 1], rows[i])) lv = i;
+    state.latestValidIdx = lv;
   }
 
   if (state.dateIdx >= 0) {
     const rawF = forecastSingleDay(rows, state.dateIdx, id, state.marketsData, state.horizon);
-    const isLatest = state.dateIdx === rows.length - 1;
+    const isLatest = state.dateIdx === state.latestValidIdx;
     const liveNewsScore =
       state.marketsData.NEWS && Number.isFinite(state.marketsData.NEWS.sentiment)
         ? state.marketsData.NEWS.sentiment
@@ -223,14 +231,23 @@ function renderFuturesAndNewsSection(f) {
         })
         .join('') +
       '</div>' +
-      '<div class="mt-2 text-[11px] text-slate-400">각 항목을 누르면 최근 20거래일 추이 그래프가 열립니다.</div>' +
+      '<div class="mt-2 text-[11px] text-slate-400">각 항목을 누르면 분봉(15분)·시간봉·일봉 추이 그래프가 열립니다.</div>' +
       (state.selectedFutChart
         ? '<div class="mt-2.5 pt-2.5 border-t border-slate-100">' +
-          '<div class="flex items-center justify-between mb-1.5">' +
+          '<div class="flex items-center justify-between gap-2 mb-2 flex-wrap">' +
           '<span id="fut-chart-title" class="text-xs font-bold text-slate-800"></span>' +
-          '<button id="fut-chart-close" type="button" class="text-[11px] font-semibold text-slate-500 hover:text-slate-800 px-2 py-0.5 rounded bg-slate-100">닫기</button>' +
+          '<div class="flex items-center gap-1">' +
+          ['15m:15분봉', '1h:1시간봉', '1d:일봉'].map(spec => {
+            const [tfCode, tfLbl] = spec.split(':');
+            const active = state.futChartTf === tfCode;
+            return '<button type="button" data-fut-tf="' + tfCode + '" class="px-2 py-0.5 rounded text-[11px] font-semibold transition ' +
+              (active ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200') + '">' + tfLbl + '</button>';
+          }).join('') +
+          '<button id="fut-chart-close" type="button" class="ml-1 text-[11px] font-semibold text-slate-500 hover:text-slate-800 px-2 py-0.5 rounded bg-slate-100">닫기</button>' +
           '</div>' +
-          '<div class="relative h-40"><canvas id="futMiniChart"></canvas></div>' +
+          '</div>' +
+          '<div id="fut-chart-status" class="text-[11px] text-slate-400 mb-1 hidden"></div>' +
+          '<div class="relative h-48"><canvas id="futMiniChart"></canvas></div>' +
           '</div>'
         : '');
   } else {
@@ -368,7 +385,7 @@ function renderForecast() {
         .map(k => {
           let val = f.extra[k];
           let isLiveOverlayVal = false;
-          const isLatestRow = state.dateIdx === rows.length - 1;
+          const isLatestRow = state.dateIdx === state.latestValidIdx;
           if (!Number.isFinite(val) && isLatestRow) {
             const futLive = state.marketsData.FUTURES || {};
             const newsLive = state.marketsData.NEWS || {};
@@ -456,7 +473,7 @@ function renderForecast() {
     MARKET_NAMES[state.key] +
     ' ' +
     horizonLabel +
-    ' (v5.5)</span>' +
+    ' (v5.6)</span>' +
     '<div class="flex items-center gap-1.5">' +
     (state.isLiveIntraday ? '<span class="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/25 text-amber-200 border border-amber-400/40 font-semibold">장중 실시간 잠정</span>' : '') +
     '<span class="text-[11px] px-2 py-0.5 rounded-full ' +
@@ -588,6 +605,12 @@ function renderForecast() {
       renderForecast();
     });
   }
+  for (const tfBtn of document.querySelectorAll('button[data-fut-tf]')) {
+    tfBtn.addEventListener('click', () => {
+      state.futChartTf = tfBtn.dataset.futTf;
+      renderForecast();
+    });
+  }
   const closeFutBtn = document.getElementById('fut-chart-close');
   if (closeFutBtn) {
     closeFutBtn.addEventListener('click', () => {
@@ -607,45 +630,76 @@ function renderForecast() {
 }
 
 
-function renderFuturesChart() {
+async function renderFuturesChart() {
   const key = state.selectedFutChart;
+  const tf = state.futChartTf || '15m';
   const canvas = document.getElementById('futMiniChart');
   const titleEl = document.getElementById('fut-chart-title');
+  const statusEl = document.getElementById('fut-chart-status');
   if (!key || !canvas || typeof Chart === 'undefined') return;
   if (state.futChartInstance) {
     state.futChartInstance.destroy();
     state.futChartInstance = null;
   }
 
+  const tfName = tf === '15m' ? '15분봉' : tf === '1h' ? '1시간봉' : '일봉';
   const labelMap = {
-    K200: '코스피200 선물 (최근 추이)',
-    NQ: '나스닥100 선물 (최근 20일)',
-    ES: 'S&P500 선물 (최근 20일)',
-    CL: 'WTI 국제유가 (최근 20일)',
-    GC: '국제 금 선물 (최근 20일)',
-    BTC: 'BTC 무기한 선물 (최근 20일)'
+    K200: '코스피200 (' + tfName + ')',
+    NQ: '나스닥100 선물 (' + tfName + ')',
+    ES: 'S&P500 선물 (' + tfName + ')',
+    CL: 'WTI 국제유가 (' + tfName + ')',
+    GC: '국제 금 선물 (' + tfName + ')',
+    BTC: 'BTC 무기한 선물 (' + tfName + ')'
   };
   if (titleEl) titleEl.textContent = labelMap[key] || key;
 
-  const fut = state.marketsData.FUTURES || {};
-  let series = fut.series && Array.isArray(fut.series[key]) ? fut.series[key] : [];
-  if (!series.length && (key === 'CL' || key === 'GC') && Array.isArray(state.marketsData[key])) {
-    series = state.marketsData[key].slice(-20).map(r => [r[0].slice(5), r[1]]);
-  }
-  if (!series.length && key === 'K200' && Array.isArray(state.marketsData.KOSPI)) {
-    // 코스피200 선물 일봉 누적 전에는 코스피 지수 20일 추이를 참고 차트로 표시
-    series = state.marketsData.KOSPI.slice(-20).map(r => [r[0].slice(5), r[1]]);
-    if (titleEl) titleEl.textContent = '코스피 현물 연동 추이 (최근 20일)';
-  }
-  if (!series.length) return;
+  const cacheId = key + ':' + tf;
+  let points = state.futChartCache[cacheId] || [];
+  const baseUrl = (state.workerUrl || '').trim().replace(/\/+$/, '');
 
-  const labels = series.map(p => p[0]);
-  const vals = series.map(p => p[1]);
+  if (!points.length && baseUrl) {
+    if (statusEl) {
+      statusEl.textContent = tfName + ' 데이터를 불러오는 중...';
+      statusEl.classList.remove('hidden');
+    }
+    try {
+      const res = await fetch(baseUrl + '/chart?key=' + encodeURIComponent(key) + '&tf=' + encodeURIComponent(tf));
+      if (res.ok) {
+        const j = await res.json();
+        if (Array.isArray(j.points) && j.points.length) {
+          points = j.points;
+          state.futChartCache[cacheId] = points;
+        }
+      }
+    } catch (_) {}
+    if (statusEl) statusEl.classList.add('hidden');
+  }
+
+  // 폴백: Worker 미연결이거나 분봉 휴장일 때 일봉 시계열 표시
+  if (!points.length) {
+    const fut = state.marketsData.FUTURES || {};
+    let series = fut.series && Array.isArray(fut.series[key]) ? fut.series[key] : [];
+    if (!series.length && (key === 'CL' || key === 'GC') && Array.isArray(state.marketsData[key])) {
+      series = state.marketsData[key].slice(-20).map(r => [r[0].slice(5), r[1]]);
+    }
+    if (!series.length && key === 'K200' && Array.isArray(state.marketsData.KOSPI)) {
+      series = state.marketsData.KOSPI.slice(-20).map(r => [r[0].slice(5), r[1]]);
+    }
+    points = series.map(p => [p[0], p[1], p[1], p[1]]);
+  }
+
+  // 사용자가 그사이 다른 차트로 바꿨으면 중단
+  if (state.selectedFutChart !== key || state.futChartTf !== tf || !points.length) return;
+  const freshCanvas = document.getElementById('futMiniChart');
+  if (!freshCanvas) return;
+
+  const labels = points.map(p => p[0]);
+  const vals = points.map(p => p[1]);
   const isUp = vals[vals.length - 1] >= vals[0];
   const stroke = isUp ? '#dc2626' : '#2563eb';
   const fillBg = isUp ? 'rgba(220, 38, 38, 0.08)' : 'rgba(37, 99, 235, 0.08)';
 
-  state.futChartInstance = new Chart(canvas, {
+  state.futChartInstance = new Chart(freshCanvas, {
     type: 'line',
     data: {
       labels,
@@ -655,15 +709,30 @@ function renderFuturesChart() {
         borderColor: stroke,
         backgroundColor: fillBg,
         borderWidth: 2,
-        pointRadius: 2,
+        pointRadius: points.length > 35 ? 0 : 2,
+        pointHoverRadius: 4,
         fill: true,
-        tension: 0.2
+        tension: 0.18
       }]
     },
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      plugins: { legend: { display: false } },
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              const p = points[ctx.dataIndex];
+              if (p && p.length >= 4 && p[2] !== p[3]) {
+                return '종가 ' + p[1].toLocaleString('en-US') + ' (고 ' + p[2].toLocaleString('en-US') + ' / 저 ' + p[3].toLocaleString('en-US') + ')';
+              }
+              return '가격 ' + Number(ctx.parsed.y).toLocaleString('en-US');
+            }
+          }
+        }
+      },
       scales: {
         x: { ticks: { maxTicksLimit: 5, font: { size: 10 } }, grid: { display: false } },
         y: { ticks: { font: { size: 10 } }, grid: { color: '#f1f5f9' } }
@@ -1033,7 +1102,7 @@ function renderBacktest() {
     '</tr></thead>' +
     '<tbody class="divide-y divide-slate-100 tabular-nums">' +
     '<tr class="bg-teal-50/50 font-semibold text-slate-900">' +
-    '<td class="py-2.5 pr-2">개선 v5.5 (시장별 전용 엔진)</td>' +
+    '<td class="py-2.5 pr-2">개선 v5.6 (시장별 전용 엔진)</td>' +
     '<td class="py-2.5 px-2 text-right text-teal-800">' +
     fmtB(brierV4) +
     '</td>' +
@@ -1132,7 +1201,7 @@ function handleFileImport(event) {
         validateImport(parsed);
         state.marketsData = { ...state.marketsData, ...parsed };
         recomputeMarket(state.key, false);
-        showToast('데이터를 반영해 v5.5 전체 모델을 재계산했습니다.');
+        showToast('데이터를 반영해 v5.6 전체 모델을 재계산했습니다.');
       } else {
         const lines = text
           .split(/\r?\n/)
@@ -1203,8 +1272,9 @@ async function fetchLiveSnapshot(isAuto) {
         const useFx = fxNow || last[3];
         if (last[0] === dateKst) {
           rows[rows.length - 1] = [dateKst, liveIdx.close, liveIdx.pct, useFx, last[4] ?? null, last[5] ?? null];
-        } else if (dateKst && dateKst > last[0]) {
-          rows.push([dateKst, liveIdx.close, liveIdx.pct, useFx, null, null]);
+        } else if (dateKst && dateKst > last[0] && Math.abs(liveIdx.close - last[1]) > 0.005) {
+          const calcPct = Number((((liveIdx.close / last[1]) - 1) * 100).toFixed(2));
+          rows.push([dateKst, liveIdx.close, calcPct, useFx, null, null]);
         }
       }
     }
@@ -1250,7 +1320,7 @@ function initApp() {
     state.dateIdx = Number(e.target.value);
     const rows = state.marketsData[state.key] || [];
     const rawF = forecastSingleDay(rows, state.dateIdx, state.key, state.marketsData, state.horizon);
-    const isLatest = state.dateIdx === rows.length - 1;
+    const isLatest = state.dateIdx === state.latestValidIdx;
     const liveNewsScore =
       state.marketsData.NEWS && Number.isFinite(state.marketsData.NEWS.sentiment)
         ? state.marketsData.NEWS.sentiment

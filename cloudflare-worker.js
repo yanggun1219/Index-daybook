@@ -374,6 +374,68 @@ async function fetchLiveNews(kst) {
   };
 }
 
+
+async function fetchDetailedChart(key, tf) {
+  const tfMap = {
+    '15m': { range: '2d', interval: '15m', binInt: '15m', limit: 64 },
+    '1h':  { range: '5d', interval: '60m', binInt: '1h',  limit: 72 },
+    '1d':  { range: '1mo', interval: '1d', binInt: '1d',  limit: 30 }
+  };
+  const cfg = tfMap[tf] || tfMap['15m'];
+
+  // BTC: Binance Futures klines -> OKX candles -> Yahoo fallback
+  if (key === 'BTC') {
+    try {
+      const res = await fetch(`https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=${cfg.binInt}&limit=${cfg.limit}`, {
+        headers: { 'User-Agent': 'Mozilla/5.0' }
+      });
+      if (res.ok) {
+        const rows = await res.json();
+        if (Array.isArray(rows) && rows.length) {
+          return rows.map(r => {
+            const kst = new Date(Number(r[0]) + 9 * 3600 * 1000);
+            const lbl = tf === '1d'
+              ? kst.toISOString().slice(5, 10)
+              : `${kst.toISOString().slice(5, 10)} ${kst.toISOString().slice(11, 16)}`;
+            return [lbl, Math.round(Number(r[4])), Math.round(Number(r[2])), Math.round(Number(r[3]))];
+          });
+        }
+      }
+    } catch (_) {}
+  }
+
+  const symMap = { NQ: 'NQ=F', ES: 'ES=F', CL: 'CL=F', GC: 'GC=F', BTC: 'BTC-USD', K200: '^KS200' };
+  const sym = symMap[key];
+  if (!sym) return [];
+  try {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?range=${cfg.range}&interval=${cfg.interval}`;
+    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    if (!res.ok) return [];
+    const json = await res.json();
+    const r0 = json?.chart?.result?.[0];
+    const ts = r0?.timestamp || [];
+    const q = r0?.indicators?.quote?.[0] || {};
+    const closes = q.close || [];
+    const highs = q.high || [];
+    const lows = q.low || [];
+    const out = [];
+    for (let i = 0; i < ts.length; i++) {
+      const c = closes[i];
+      if (!Number.isFinite(c)) continue;
+      const kst = new Date(ts[i] * 1000 + 9 * 3600 * 1000);
+      const lbl = tf === '1d'
+        ? kst.toISOString().slice(5, 10)
+        : `${kst.toISOString().slice(5, 10)} ${kst.toISOString().slice(11, 16)}`;
+      const h = Number.isFinite(highs[i]) ? Number(highs[i].toFixed(2)) : Number(c.toFixed(2));
+      const l = Number.isFinite(lows[i]) ? Number(lows[i].toFixed(2)) : Number(c.toFixed(2));
+      out.push([lbl, Number(c.toFixed(2)), h, l]);
+    }
+    return out.slice(-cfg.limit);
+  } catch (_) {
+    return [];
+  }
+}
+
 export default {
   async fetch(request, env) {
     const headers = corsHeaders(request);
@@ -382,12 +444,24 @@ export default {
     }
 
     const url = new URL(request.url);
+    if (url.pathname === '/chart') {
+      const key = (url.searchParams.get('key') || '').toUpperCase();
+      const tf = url.searchParams.get('tf') || '15m';
+      const cache = caches.default;
+      const cKey = new Request(`https://kis-chart-cache.internal/v56/${key}/${tf}`);
+      const hit = await cache.match(cKey);
+      if (hit) return new Response(await hit.text(), { status: 200, headers });
+      const points = await fetchDetailedChart(key, tf);
+      const body = JSON.stringify({ key, tf, points });
+      await cache.put(cKey, new Response(body, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'max-age=60' } }));
+      return new Response(body, { status: 200, headers });
+    }
     if (url.pathname !== '/live' && url.pathname !== '/') {
       return new Response(JSON.stringify({ error: 'Not Found' }), { status: 404, headers });
     }
 
     const cache = caches.default;
-    const respCacheKey = new Request('https://kis-live-cache.internal/v55/live');
+    const respCacheKey = new Request('https://kis-live-cache.internal/v56/live');
     const cachedResp = await cache.match(respCacheKey);
     if (cachedResp) {
       const body = await cachedResp.text();
