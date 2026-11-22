@@ -1,4 +1,4 @@
-// 지수 관측소 v4.3 — 나스닥 한국장 선행 잔차 + 전용 정규화 + VIX3M·DAX 확장 + 1일/5일 듀얼 호라이즌
+// 지수 관측소 v5.5 — 나스닥 한국장 선행 잔차 + 전용 정규화 + VIX3M·DAX 확장 + 1일/5일 듀얼 호라이즌
 
 const MIN_BASE_SAMPLES = 18;
 const MIN_EXTRA_SAMPLES = 60;
@@ -375,7 +375,7 @@ function getCandidateKeys(key, horizon) {
     : ['breadth', 'flow', 'vix', 'oil', 'gold', 'krFut', 'news'];
 }
 
-function makeExtraRecord(refUsDate, breadth, flow, maps, current, key, nextUsDate) {
+function makeExtraRecord(refUsDate, breadth, flow, maps, current, key, nextUsDate, curDate) {
   const vixVal = refUsDate ? maps.vixMap.get(refUsDate) : undefined;
   const vix3mVal = refUsDate ? maps.vix3mMap.get(refUsDate) : undefined;
   const vixRatio =
@@ -410,9 +410,9 @@ function makeExtraRecord(refUsDate, breadth, flow, maps, current, key, nextUsDat
     oil: refUsDate ? maps.oilPct.get(refUsDate) : undefined,
     gold: refUsDate ? maps.goldPct.get(refUsDate) : undefined,
     dax: refUsDate ? maps.daxPct.get(refUsDate) : undefined,
-    news: refUsDate ? maps.newsMap.get(refUsDate) : undefined,
-    krFut: refUsDate ? maps.krFutMap.get(refUsDate) : undefined,
-    krBasis: refUsDate ? maps.krBasisMap.get(refUsDate) : undefined,
+    news: (curDate && maps.newsMap.get(curDate)) ?? (refUsDate ? maps.newsMap.get(refUsDate) : undefined),
+    krFut: (curDate && maps.krFutMap.get(curDate)) ?? (refUsDate ? maps.krFutMap.get(refUsDate) : undefined),
+    krBasis: (curDate && maps.krBasisMap.get(curDate)) ?? (refUsDate ? maps.krBasisMap.get(refUsDate) : undefined),
     usVix,
     ret20: current ? current.ret20 : undefined,
     krLead,
@@ -481,7 +481,7 @@ function buildHistories(rows, key, data, horizon) {
     const nextUsDate = i + 1 < rows.length ? rows[i + 1][0] : null;
     const current = extractBaseFeatures(rows, i, key, data);
     const refUsDate = key === 'NASDAQ' ? date : current ? current.usDate : null;
-    const extra = makeExtraRecord(refUsDate, breadth, flow, maps, current, key, nextUsDate);
+    const extra = makeExtraRecord(refUsDate, breadth, flow, maps, current, key, nextUsDate, date);
 
     let f = null;
     let g = null;
@@ -572,7 +572,7 @@ function forecastSingleDay(rows, targetIdx, key, data, horizon) {
       vol: f.vol,
       y,
       up: Number(y > 0),
-      extra: makeExtraRecord(refUs, breadth, flow, maps, f, key, nextUsDate)
+      extra: makeExtraRecord(refUs, breadth, flow, maps, f, key, nextUsDate, date)
     });
   }
   if (pool.length < MIN_BASE_SAMPLES) return null;
@@ -580,7 +580,7 @@ function forecastSingleDay(rows, targetIdx, key, data, horizon) {
   const [curDate, , , , curBreadth, curFlow] = rows[targetIdx];
   const nextUsDate = targetIdx + 1 < rows.length ? rows[targetIdx + 1][0] : null;
   const refUsDate = key === 'NASDAQ' ? curDate : current.usDate;
-  const extra = makeExtraRecord(refUsDate, curBreadth, curFlow, maps, current, key, nextUsDate);
+  const extra = makeExtraRecord(refUsDate, curBreadth, curFlow, maps, current, key, nextUsDate, curDate);
 
   const baseModel = fitLogisticModel(pool, baseMeta.length, null, hp.useRecency, hp.l2Floor);
   let g = predictWithModel(baseModel, current.feats, current.vol, key, baseMeta, h);

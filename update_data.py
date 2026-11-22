@@ -1,26 +1,225 @@
 """
-지수 관측소 v4.3 — 일간 시세·원자재·선물·유럽장(DAX)·변동성 기간구조(VIX3M)·글로벌 뉴스 자동 수집 스크립트
+지수 관측소 v5.5 — 일간 시세·KIS 국내선물(토큰 1일 1회 캐싱)·BTC 무기한 선물·국문 뉴스 요약 자동 수집 스크립트
 - 실행: python3 update_data.py --years 5 --krx-days 30
 - 수집 항목:
-  * 국내·미국 지수 및 매크로: ^KS11, ^KQ11, ^IXIC, KRW=X, ^SOX, ^VIX, ^VIX3M, ^TNX, DX-Y.NYB, ^GDAXI
-  * 원자재 5년 일봉: WTI 국제유가(CL=F), 국제 금 선물(GC=F)
-  * 장전 실시간 선물 스냅샷: 나스닥100 선물(NQ=F), S&P500 선물(ES=F), WTI(CL=F), 금(GC=F)
-  * 글로벌 주요 경제 뉴스 RSS 헤드라인 및 간이 심리 점수(-100 ~ +100)
+  * 국내·미국 지수 및 매크로: ^KS11, ^KQ11, ^IXIC, KRW=X, ^SOX, ^VIX, ^VIX3M, ^TNX, DX-Y.NYB, ^GDAXI, CL=F, GC=F
+  * 한국투자증권 실전 API(FHMIF10000000): 코스피200 최근월물 선물 현재가·등락률·베이시스 (토큰 /tmp 캐싱)
+  * 글로벌 선물 스냅샷: 나스닥100(NQ=F), S&P500(ES=F), WTI(CL=F), 금(GC=F), BTC 무기한 선물(Binance->OKX->Yahoo)
+  * 국문 경제 뉴스 1줄 요약(한경·매경 RSS) + 미국 증시 속보 자동 한글 번역 및 심리 점수(-100 ~ +100)
 """
 import argparse
 import io
-import os
-import re
-import zipfile
 import json
 import math
+import os
+import re
 import time
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 import yfinance as yf
+
+KIS_REAL_BASE = "https://openapi.koreainvestment.com:9443"
+KIS_TOKEN_CACHE_PATH = Path(os.environ.get("KIS_TOKEN_CACHE", "/tmp/kis_token_cache.json"))
+
+
+def _http_get_json(url: str, headers: dict = None, timeout: int = 12):
+    req_headers = {"User-Agent": "Mozilla/5.0"}
+    if headers:
+        req_headers.update(headers)
+    req = urllib.request.Request(url, headers=req_headers, method="GET")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _http_post_json(url: str, payload: dict, headers: dict = None, timeout: int = 15):
+    body = json.dumps(payload).encode("utf-8")
+    req_headers = {"Content-Type": "application/json; charset=UTF-8", "User-Agent": "Mozilla/5.0"}
+    if headers:
+        req_headers.update(headers)
+    req = urllib.request.Request(url, data=body, headers=req_headers, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def get_kis_access_token(app_key: str, app_secret: str):
+    """KIS 1일 1회 토큰 발급 원칙 준수: /tmp 캐시 파일에서 20시간 내 유효 토큰 재사용"""
+    now_ts = time.time()
+    if KIS_TOKEN_CACHE_PATH.exists():
+        try:
+            cached = json.loads(KIS_TOKEN_CACHE_PATH.read_text(encoding="utf-8"))
+            if cached.get("access_token") and cached.get("expires_at", 0) > now_ts:
+                print("KIS 캐시 토큰 재사용")
+                return cached["access_token"]
+        except Exception:
+            pass
+
+    tok_res = _http_post_json(
+        f"{KIS_REAL_BASE}/oauth2/tokenP",
+        {"grant_type": "client_credentials", "appkey": app_key, "appsecret": app_secret},
+    )
+    access_token = tok_res.get("access_token")
+    if not access_token:
+        raise RuntimeError(f"KIS 토큰 발급 실패: {tok_res}")
+
+    try:
+        KIS_TOKEN_CACHE_PATH.write_text(
+            json.dumps({"access_token": access_token, "expires_at": now_ts + 72000}),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        print(f"KIS 토큰 캐시 저장 건너뜀: {exc}")
+    return access_token
+
+
+def _resolve_kospi200_futures_candidates():
+    cands = []
+    env_code = os.environ.get("KIS_FUTURES_CODE", "").strip()
+    if env_code:
+        cands.append(env_code)
+
+    try:
+        mst_url = "https://new.real.download.dws.co.kr/common/master/fo_idx_code_mts.mst.zip"
+        req = urllib.request.Request(mst_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            zbytes = resp.read()
+        with zipfile.ZipFile(io.BytesIO(zbytes)) as zf:
+            for name in zf.namelist():
+                raw = zf.read(name).decode("cp949", errors="ignore")
+                for line in raw.splitlines():
+                    parts = [p.strip() for p in line.split("|")]
+                    if len(parts) < 3:
+                        continue
+                    short_code, kor_name = parts[1], parts[2]
+                    if ("코스피200" in kor_name or "KOSPI200" in kor_name.upper()) and "선물" in kor_name:
+                        if "미니" in kor_name or "스프레드" in kor_name or "SP" in short_code.upper():
+                            continue
+                        if re.match(r"^(A01|101)[0-9A-Z]{2,5}$", short_code) and short_code not in cands:
+                            cands.append(short_code)
+    except Exception as exc:
+        print(f"KIS 마스터 파일 조회 건너뜀: {exc}")
+
+    now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
+    y, m = now_kst.year, now_kst.month
+    next_qs = [(y, qm) for qm in (3, 6, 9, 12) if qm > m or (qm == m and now_kst.day <= 14)]
+    next_qs.append((y + 1, 3))
+    month_hex = {3: "3", 6: "6", 9: "9", 12: "C"}
+    year_old = {2025: "W", 2026: "X", 2027: "Y", 2028: "Z"}
+    for qy, qm in next_qs[:2]:
+        for c in (f"A01{str(qy)[-1]}{month_hex[qm]}", f"A01{str(qy)[-1]}{qm:02d}"):
+            if c not in cands:
+                cands.append(c)
+        if qy in year_old:
+            code_old = f"101{year_old[qy]}{qm:02d}"
+            if code_old not in cands:
+                cands.append(code_old)
+    return cands
+
+
+def fetch_kis_domestic_futures():
+    app_key = os.environ.get("KIS_APP_KEY", "").strip()
+    app_secret = os.environ.get("KIS_APP_SECRET", "").strip()
+    if not app_key or not app_secret:
+        print("KIS_APP_KEY / KIS_APP_SECRET 미설정 — 국내선물 API 건너뜀")
+        return None
+
+    try:
+        access_token = get_kis_access_token(app_key, app_secret)
+        headers = {
+            "Content-Type": "application/json; charset=UTF-8",
+            "authorization": f"Bearer {access_token}",
+            "appkey": app_key,
+            "appsecret": app_secret,
+            "tr_id": "FHMIF10000000",
+            "custtype": "P",
+        }
+        for code in _resolve_kospi200_futures_candidates():
+            url = (
+                f"{KIS_REAL_BASE}/uapi/domestic-futureoption/v1/quotations/inquire-price"
+                f"?FID_COND_MRKT_DIV_CODE=F&FID_INPUT_ISCD={code}"
+            )
+            try:
+                res = _http_get_json(url, headers=headers)
+                if res.get("rt_cd") != "0":
+                    continue
+                out1 = res.get("output1") or {}
+                out3 = res.get("output3") or {}
+                price_str = out1.get("futs_prpr") or out1.get("stck_prpr")
+                if not price_str:
+                    continue
+                price = float(price_str)
+                if price <= 0:
+                    continue
+                pct = float(out1.get("futs_prdy_ctrt") or 0.0)
+                basis_raw = out1.get("mrkt_basis") or out1.get("basis") or out3.get("mrkt_basis")
+                basis = round(float(basis_raw), 2) if basis_raw not in (None, "") else None
+                name = (out1.get("hts_kor_isnm") or f"코스피200 선물 ({code})").strip()
+                print(f"KIS 국내선물 수집 성공: {code} ({name}) {price} ({pct:+.2f}%, 베이시스 {basis})")
+                return {
+                    "K200": round(price, 2),
+                    "K200_pct": round(pct, 2),
+                    "K200_basis": basis,
+                    "K200_code": code,
+                    "K200_name": name,
+                }
+            except Exception:
+                continue
+    except Exception as exc:
+        print(f"KIS 국내선물 API 오류: {exc}")
+    return None
+
+
+def fetch_btc_perp():
+    # 1) Binance Futures
+    try:
+        t = _http_get_json("https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=BTCUSDT")
+        price = float(t["lastPrice"])
+        pct = float(t["priceChangePercent"])
+        funding = None
+        try:
+            f = _http_get_json("https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT")
+            funding = round(float(f["lastFundingRate"]) * 100.0, 4)
+        except Exception:
+            pass
+        if price > 0:
+            return {"BTC": round(price), "BTC_pct": round(pct, 2), "BTC_funding": funding, "BTC_src": "Binance"}
+    except Exception:
+        pass
+
+    # 2) OKX BTC-USDT-SWAP Fallback
+    try:
+        tj = _http_get_json("https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT-SWAP")
+        row = (tj.get("data") or [{}])[0]
+        price = float(row["last"])
+        open24 = float(row.get("open24h") or price)
+        pct = ((price / open24) - 1.0) * 100.0 if open24 else 0.0
+        funding = None
+        try:
+            fj = _http_get_json("https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP")
+            funding = round(float((fj.get("data") or [{}])[0]["fundingRate"]) * 100.0, 4)
+        except Exception:
+            pass
+        if price > 0:
+            return {"BTC": round(price), "BTC_pct": round(pct, 2), "BTC_funding": funding, "BTC_src": "OKX"}
+    except Exception:
+        pass
+
+    # 3) Yahoo BTC-USD Fallback
+    try:
+        df = yf.download("BTC-USD", period="5d", interval="1d", progress=False)
+        if not df.empty:
+            close = df["Close"].squeeze().dropna()
+            if len(close) >= 2:
+                last_p, prev_p = float(close.iloc[-1]), float(close.iloc[-2])
+                pct = ((last_p / prev_p) - 1.0) * 100.0 if prev_p else 0.0
+                return {"BTC": round(last_p), "BTC_pct": round(pct, 2), "BTC_funding": None, "BTC_src": "Yahoo"}
+    except Exception:
+        pass
+    return {}
 
 
 def fetch_series(ticker: str, years: int = 5):
@@ -56,148 +255,6 @@ def fetch_optional_series(ticker: str, years: int = 5):
         return {}
 
 
-
-KIS_REAL_BASE = "https://openapi.koreainvestment.com:9443"
-
-
-def _kis_post_json(url: str, payload: dict, headers: dict = None):
-    body = json.dumps(payload).encode("utf-8")
-    req_headers = {"Content-Type": "application/json; charset=UTF-8", "User-Agent": "Mozilla/5.0"}
-    if headers:
-        req_headers.update(headers)
-    req = urllib.request.Request(url, data=body, headers=req_headers, method="POST")
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
-def _kis_get_json(url: str, headers: dict):
-    req = urllib.request.Request(url, headers=headers, method="GET")
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
-def _resolve_kospi200_futures_candidates():
-    """환경변수 -> KIS 마스터 파일 -> 분기월물 자동 생성 순으로 코스피200 최근월물 후보 코드 반환"""
-    cands = []
-    env_code = os.environ.get("KIS_FUTURES_CODE", "").strip()
-    if env_code:
-        cands.append(env_code)
-
-    # 1) KIS 공개 지수선물옵션 마스터 파일에서 A01 / 101 근월물 탐색
-    try:
-        mst_url = "https://new.real.download.dws.co.kr/common/master/fo_idx_code_mts.mst.zip"
-        req = urllib.request.Request(mst_url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=12) as resp:
-            zbytes = resp.read()
-        with zipfile.ZipFile(io.BytesIO(zbytes)) as zf:
-            for name in zf.namelist():
-                raw = zf.read(name).decode("cp949", errors="ignore")
-                for line in raw.splitlines():
-                    parts = [p.strip() for p in line.split("|")]
-                    if len(parts) < 3:
-                        continue
-                    short_code = parts[1]
-                    kor_name = parts[2]
-                    # 코스피200 정규 지수선물 (미니/스프레드 제외)
-                    if ("코스피200" in kor_name or "KOSPI200" in kor_name.upper()) and "선물" in kor_name:
-                        if "미니" in kor_name or "스프레드" in kor_name or "SP" in short_code.upper():
-                            continue
-                        if re.match(r"^(A01|101)[0-9A-Z]{2,5}$", short_code) and short_code not in cands:
-                            cands.append(short_code)
-    except Exception as exc:
-        print(f"KIS 마스터 파일 조회 건너뜀: {exc}")
-
-    # 2) 분기월물(3,6,9,12월) 알고리즘 폴백 (2026년 신규 A01 체계 및 구 101 체계 병행)
-    now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
-    y = now_kst.year
-    m = now_kst.month
-    # 두 번째 목요일(대략 14일) 이후 분기월이면 다음 분기로 이월
-    q_months = [3, 6, 9, 12]
-    next_qs = []
-    for qm in q_months:
-        if qm > m or (qm == m and now_kst.day <= 14):
-            next_qs.append((y, qm))
-    next_qs.append((y + 1, 3))
-    month_hex = {3: "3", 6: "6", 9: "9", 12: "C"}
-    year_old = {2025: "W", 2026: "X", 2027: "Y", 2028: "Z"}
-    for qy, qm in next_qs[:2]:
-        code_new = f"A01{str(qy)[-1]}{month_hex[qm]}"
-        code_new6 = f"A01{str(qy)[-1]}{qm:02d}"
-        for c in (code_new, code_new6):
-            if c not in cands:
-                cands.append(c)
-        if qy in year_old:
-            code_old = f"101{year_old[qy]}{qm:02d}"
-            if code_old not in cands:
-                cands.append(code_old)
-    return cands
-
-
-def fetch_kis_domestic_futures():
-    """한국투자증권 실전투자 REST API(FHMIF10000000)로 코스피200 최근월물 선물 시세·베이시스 조회"""
-    app_key = os.environ.get("KIS_APP_KEY", "").strip()
-    app_secret = os.environ.get("KIS_APP_SECRET", "").strip()
-    if not app_key or not app_secret:
-        print("KIS_APP_KEY / KIS_APP_SECRET 미설정 — 국내선물 API 건너뜀")
-        return None
-
-    try:
-        tok_res = _kis_post_json(
-            f"{KIS_REAL_BASE}/oauth2/tokenP",
-            {"grant_type": "client_credentials", "appkey": app_key, "appsecret": app_secret},
-        )
-        access_token = tok_res.get("access_token")
-        if not access_token:
-            print(f"KIS 토큰 발급 실패: {tok_res}")
-            return None
-
-        headers = {
-            "Content-Type": "application/json; charset=UTF-8",
-            "authorization": f"Bearer {access_token}",
-            "appkey": app_key,
-            "appsecret": app_secret,
-            "tr_id": "FHMIF10000000",
-            "custtype": "P",
-        }
-
-        for code in _resolve_kospi200_futures_candidates():
-            url = (
-                f"{KIS_REAL_BASE}/uapi/domestic-futureoption/v1/quotations/inquire-price"
-                f"?FID_COND_MRKT_DIV_CODE=F&FID_INPUT_ISCD={code}"
-            )
-            try:
-                res = _kis_get_json(url, headers)
-                if res.get("rt_cd") != "0":
-                    continue
-                out1 = res.get("output1") or {}
-                out3 = res.get("output3") or {}
-                price_str = out1.get("futs_prpr") or out1.get("stck_prpr")
-                if not price_str:
-                    continue
-                price = float(price_str)
-                if price <= 0:
-                    continue
-                pct = float(out1.get("futs_prdy_ctrt") or 0.0)
-                basis_raw = out1.get("mrkt_basis") or out1.get("basis") or out3.get("mrkt_basis")
-                basis = round(float(basis_raw), 2) if basis_raw not in (None, "") else None
-                name = (out1.get("hts_kor_isnm") or f"코스피200 선물 ({code})").strip()
-                print(f"KIS 국내선물 수집 성공: {code} ({name}) {price} ({pct:+.2f}%, 베이시스 {basis})")
-                return {
-                    "K200": round(price, 2),
-                    "K200_pct": round(pct, 2),
-                    "K200_basis": basis,
-                    "K200_code": code,
-                    "K200_name": name,
-                }
-            except Exception as inner_exc:
-                print(f"KIS 선물 후보({code}) 건너뜀: {inner_exc}")
-                continue
-        print("KIS 국내선물 유효 종목코드를 찾지 못했습니다.")
-    except Exception as exc:
-        print(f"KIS 국내선물 API 오류: {exc}")
-    return None
-
-
 def fetch_live_futures():
     snapshot = {"updatedKst": datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M KST")}
     pairs = [("NQ=F", "NQ"), ("ES=F", "ES"), ("CL=F", "CL"), ("GC=F", "GC")]
@@ -215,44 +272,93 @@ def fetch_live_futures():
                 snapshot[f"{key}_pct"] = round(pct, 2)
         except Exception as exc:
             print(f"선물 스냅샷 건너뜀({ticker}): {exc}")
+    snapshot.update(fetch_btc_perp())
     return snapshot
 
 
-POS_WORDS = ("rally", "surge", "gain", "rise", "jump", "beat", "cut", "dovish", "cooling", "growth", "record", "up", "rebound", "상승", "반등", "호조", "강세", "완화")
-NEG_WORDS = ("drop", "fall", "plunge", "slump", "crash", "fear", "inflation", "hawkish", "tariff", "war", "risk", "down", "selloff", "하락", "급락", "우려", "약세", "관세", "충격")
+POS_WORDS = ("rally", "surge", "gain", "rise", "jump", "beat", "cut", "dovish", "cooling", "growth", "record", "up", "rebound", "bull", "soar", "boost", "상승", "반등", "호조", "강세", "완화", "최고", "급등", "돌파", "기대", "순매수")
+NEG_WORDS = ("drop", "fall", "plunge", "slump", "crash", "fear", "inflation", "hawkish", "tariff", "war", "risk", "down", "selloff", "bear", "sink", "tumble", "하락", "급락", "우려", "약세", "관세", "충격", "폭락", "위기", "경계", "순매도", "긴축")
 
 
-def fetch_global_news(limit: int = 6):
-    feeds = [
-        ("Yahoo Finance", "https://finance.yahoo.com/news/rssindex"),
-        ("Google News 경제", "https://news.google.com/rss/search?q=NASDAQ+OR+KOSPI+OR+Fed+OR+oil&hl=en-US&gl=US&ceid=US:en"),
-    ]
+def _clean_text(s: str) -> str:
+    s = re.sub(r"<[^>]+>", " ", s or "")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _translate_en_to_ko(text: str) -> str:
+    try:
+        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ko&dt=t&q={urllib.parse.quote(text)}"
+        data = _http_get_json(url, timeout=8)
+        if isinstance(data, list) and data and isinstance(data[0], list):
+            joined = "".join(seg[0] for seg in data[0] if isinstance(seg, list) and seg and seg[0])
+            return joined.strip() or text
+    except Exception:
+        pass
+    return text
+
+
+def fetch_global_news(limit: int = 15):
     items = []
     seen = set()
-    for source_name, url in feeds:
+
+    # 1) 국내 경제지 증권 RSS (국문 + 1줄 요약)
+    kr_feeds = [
+        ("한국경제", "https://www.hankyung.com/feed/finance"),
+        ("매일경제", "https://www.mk.co.kr/rss/50200011/"),
+    ]
+    for source_name, url in kr_feeds:
+        if len(items) >= 10:
+            break
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=10) as resp:
                 xml_bytes = resp.read()
             root = ET.fromstring(xml_bytes)
             for item in root.findall(".//item"):
-                title = (item.findtext("title") or "").strip()
+                title = _clean_text(item.findtext("title") or "")
                 link = (item.findtext("link") or "").strip()
+                summary = _clean_text(item.findtext("description") or "")
+                if len(summary) > 96:
+                    summary = summary[:95] + "…"
                 if not title or title in seen:
                     continue
                 seen.add(title)
-                items.append({"title": title, "url": link, "source": source_name})
-                if len(items) >= limit:
+                items.append({"title": title, "summary": summary, "url": link, "source": source_name, "translated": False})
+                if len(items) >= 10:
                     break
         except Exception as exc:
-            print(f"뉴스 RSS 건너뜀({source_name}): {exc}")
-        if len(items) >= limit:
-            break
+            print(f"국문 뉴스 RSS 건너뜀({source_name}): {exc}")
+
+    # 2) 미국 증시 글로벌 속보 (Yahoo Finance JSON -> 자동 국문 번역 + 번역 링크)
+    try:
+        y_url = "https://query1.finance.yahoo.com/v1/finance/search?q=NASDAQ+Fed+stock+market&newsCount=8&quotesCount=0"
+        y_json = _http_get_json(y_url, timeout=10)
+        for n in y_json.get("news", []):
+            if len(items) >= limit:
+                break
+            title = str(n.get("title") or "").strip()
+            link = str(n.get("link") or "").strip()
+            source = str(n.get("publisher") or "Yahoo Finance").strip()
+            if not title or title in seen:
+                continue
+            seen.add(title)
+            ko_title = _translate_en_to_ko(title)
+            ko_url = f"https://translate.google.com/translate?sl=en&tl=ko&u={urllib.parse.quote(link, safe='')}" if link else ""
+            items.append({
+                "title": ko_title,
+                "summary": f"원문: {title}" if ko_title != title else "",
+                "url": ko_url,
+                "source": source,
+                "translated": True,
+            })
+    except Exception as exc:
+        print(f"영문 뉴스 조회 건너뜀: {exc}")
 
     pos_hits = 0
     neg_hits = 0
     for it in items:
-        low = it["title"].lower()
+        low = f"{it['title']} {it.get('summary', '')}".lower()
         pos_hits += sum(1 for w in POS_WORDS if w in low)
         neg_hits += sum(1 for w in NEG_WORDS if w in low)
     total = pos_hits + neg_hits
@@ -260,7 +366,7 @@ def fetch_global_news(limit: int = 6):
     return {
         "updatedKst": datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M KST"),
         "sentiment": sentiment,
-        "items": items[:5],
+        "items": items[:limit],
     }
 
 
@@ -391,7 +497,7 @@ def main():
     with temp.open("w", encoding="utf-8") as f:
         f.write("const markets = " + json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + ";\n")
     temp.replace(data_path)
-    print(f"Updated v4.3 data.js -> KOSPI:{len(payload['KOSPI'])}, VIX3M:{len(payload['VIX3M'])}, DAX:{len(payload['DAX'])}, NEWS:{len(payload['NEWS']['items'])}")
+    print(f"Updated v5.5 data.js -> KOSPI:{len(payload['KOSPI'])}, NEWS:{len(payload['NEWS']['items'])}, BTC:{payload['FUTURES'].get('BTC')}")
 
 
 if __name__ == "__main__":
