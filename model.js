@@ -1049,15 +1049,23 @@ function applyWeekendOilOverlay(forecast, clPct, isWeekend, enabled) {
 
 
 // ============================================================
-// v8.0 시간대별 시초가(장전) / 시초가 대비 종가(장중) 전용 예측 엔진
+// v8.2 시간대별 시초가(장전 적응형 야간 갭 엔진) / 시초가 대비 종가(장중) 예측
 // ============================================================
+function isK200DaySessionKst(nowMs) {
+  const ms = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const kst = new Date(ms + 9 * 3600 * 1000);
+  const dow = kst.getUTCDay(); // 0=일, 6=토
+  const mins = kst.getUTCHours() * 60 + kst.getUTCMinutes();
+  // 한국 주간 코스피200 선물 유효 시간: 평일 08:45 ~ 15:45 KST
+  return dow >= 1 && dow <= 5 && mins >= 8 * 60 + 45 && mins <= 15 * 60 + 45;
+}
+
 function detectSessionPhase(marketKey, nowMs) {
   const ms = Number.isFinite(nowMs) ? nowMs : Date.now();
   const isUs = marketKey === 'NASDAQ' || (typeof marketKey === 'string' && !marketKey.endsWith('.KS') && !marketKey.endsWith('.KQ') && marketKey !== 'KOSPI' && marketKey !== 'KOSDAQ');
   if (!isUs) {
-    // 한국 정규장: 평일 KST 09:00 ~ 15:29
     const kst = new Date(ms + 9 * 3600 * 1000);
-    const dow = kst.getUTCDay(); // 0=일, 6=토
+    const dow = kst.getUTCDay();
     const mins = kst.getUTCHours() * 60 + kst.getUTCMinutes();
     if (dow >= 1 && dow <= 5 && mins >= 9 * 60 && mins < 15 * 60 + 30) {
       const progress = Math.max(0.05, Math.min(0.95, (mins - 9 * 60) / 390));
@@ -1065,7 +1073,6 @@ function detectSessionPhase(marketKey, nowMs) {
     }
     return { phase: 'preopen', progress: 0, label: '장전 · 다음 시초가 예측' };
   } else {
-    // 미국 정규장: 평일 ET 09:30 ~ 15:59 (3월~11월 초 EDT UTC-4, 그 외 EST UTC-5 근사)
     const utc = new Date(ms);
     const m = utc.getUTCMonth() + 1;
     const etOffset = (m >= 4 && m <= 10) ? -4 : -5;
@@ -1085,49 +1092,64 @@ function computePhaseForecast(baseP, opts) {
   const phase = o.phase || 'preopen';
   const isUs = Boolean(o.isUs);
   const marketKey = o.marketKey || (isUs ? 'NASDAQ' : 'KOSPI');
+  const nowMs = Number.isFinite(o.nowMs) ? o.nowMs : Date.now();
   let p = Number.isFinite(baseP) ? baseP : 0.5;
   const factors = [];
 
   if (phase === 'preopen') {
-    // 장전 시초가(갭) 예측: 야간 선행지표(EWY, NQ=F, K200, 24H 무기한) 반영 강화
-    let deltaLogit = 0;
+    // 장전 시초가(갭) 전용 적응형 엔진:
+    // 야간 미국장(EWY, NQ=F, ^IXIC, ES=F, 환율)이 크게 움직일수록 어제 종가 관성보다 야간 갭 신호가 압도적으로 주도
+    let wSum = 0;
+    let sigSum = 0;
+    const addSig = (val, weight, label) => {
+      if (!Number.isFinite(val)) return;
+      sigSum += val * weight;
+      wSum += weight;
+      factors.push({ label, val: Number(val.toFixed(2)), unit: '%' });
+    };
+
     if (!isUs) {
-      if (Number.isFinite(o.ewyPct) && Math.abs(o.ewyPct) >= 0.15) {
-        const d = Math.max(-0.55, Math.min(0.55, o.ewyPct * 0.22));
-        deltaLogit += d;
-        factors.push({ label: '야간 MSCI 한국(EWY)', val: o.ewyPct, unit: '%' });
+      // 1) 미국장 나스닥 실시간(^IXIC)과 선물(NQ=F) 중 더 뚜렷한 최신 신호 채택
+      let usTech = NaN;
+      if (Number.isFinite(o.ixicPct) && Number.isFinite(o.nqPct)) {
+        usTech = Math.abs(o.ixicPct) >= Math.abs(o.nqPct) ? o.ixicPct : o.nqPct;
+      } else if (Number.isFinite(o.ixicPct)) {
+        usTech = o.ixicPct;
+      } else if (Number.isFinite(o.nqPct)) {
+        usTech = o.nqPct;
       }
-      if (Number.isFinite(o.nqPct) && Math.abs(o.nqPct) >= 0.15) {
-        const d = Math.max(-0.40, Math.min(0.40, o.nqPct * 0.16));
-        deltaLogit += d;
-        factors.push({ label: '나스닥100 선물(NQ)', val: o.nqPct, unit: '%' });
+
+      addSig(o.ewyPct, 0.45, '야간 MSCI 한국(EWY)');
+      addSig(usTech, 0.35, '미국 나스닥 실시간/선물');
+      addSig(o.esPct, 0.10, 'S&P500 선물(ES)');
+      if (Number.isFinite(o.fxPct)) {
+        // 원/달러 환율 하락(-)은 원화 강세(호재 +), 상승(+)은 원화 약세(악재 -)
+        addSig(-o.fxPct * 1.2, 0.10, '원/달러 환율(역방향)');
       }
-      if (Number.isFinite(o.k200Pct) && Math.abs(o.k200Pct) >= 0.1) {
-        const d = Math.max(-0.45, Math.min(0.45, o.k200Pct * 0.18));
-        deltaLogit += d;
-        factors.push({ label: '코스피200 선물', val: o.k200Pct, unit: '%' });
+      // 주간 K200 선물은 오직 08:45~15:45 KST 장전 동시호가/장중일 때만 유효 (야간엔 낡은 전일 종가 차단!)
+      if (isK200DaySessionKst(nowMs) && Number.isFinite(o.k200Pct)) {
+        addSig(o.k200Pct, 0.55, '장전 코스피200 선물');
+      }
+      if (Number.isFinite(o.perpPct)) {
+        addSig(o.perpPct, 0.50, '24H 무기한 선물');
       }
     } else {
-      if (Number.isFinite(o.nqPct) && Math.abs(o.nqPct) >= 0.1) {
-        const d = Math.max(-0.65, Math.min(0.65, o.nqPct * 0.28));
-        deltaLogit += d;
-        factors.push({ label: '나스닥100 선물(NQ)', val: o.nqPct, unit: '%' });
-      }
-      if (Number.isFinite(o.esPct) && Math.abs(o.esPct) >= 0.1) {
-        const d = Math.max(-0.30, Math.min(0.30, o.esPct * 0.14));
-        deltaLogit += d;
-        factors.push({ label: 'S&P500 선물(ES)', val: o.esPct, unit: '%' });
+      addSig(o.nqPct, 0.70, '나스닥100 선물(NQ)');
+      addSig(o.esPct, 0.25, 'S&P500 선물(ES)');
+      if (Number.isFinite(o.perpPct)) {
+        addSig(o.perpPct, 0.55, '24H 무기한 선물');
       }
     }
-    if (Number.isFinite(o.perpPct) && Math.abs(o.perpPct) >= 0.15) {
-      const d = Math.max(-0.45, Math.min(0.45, o.perpPct * 0.18));
-      deltaLogit += d;
-      factors.push({ label: '24H 무기한 선물', val: o.perpPct, unit: '%' });
+
+    if (wSum > 0) {
+      const overnightSignal = sigSum / wSum; // 가중 평균 야간 등락률(%)
+      const pOvernight = sigmoid(overnightSignal * 0.95);
+      // 조용한 밤(|sig|<0.3%)엔 기존 모델 60~65% 유지, 급등락 밤(|sig|>=2%)엔 야간 갭 신호 최대 88% 주도
+      const wOvernight = Math.min(0.88, 0.35 + 0.28 * Math.abs(overnightSignal));
+      p = wOvernight * pOvernight + (1 - wOvernight) * p;
     }
-    const pc = Math.max(0.03, Math.min(0.97, p));
-    p = sigmoid(Math.log(pc / (1 - pc)) + deltaLogit);
   } else {
-    // 장중 시초가 대비 종가(양봉/음봉) 예측: 현재 시가 대비 위치 + 남은 변동성 + 기본 모델 결합
+    // 장중 시초가 대비 종가(양봉/음봉) 예측
     const curPrice = o.curPrice;
     const todayOpen = o.todayOpen;
     const progress = Number.isFinite(o.progress) ? Math.max(0.05, Math.min(0.95, o.progress)) : 0.45;
@@ -1135,9 +1157,7 @@ function computePhaseForecast(baseP, opts) {
     if (Number.isFinite(curPrice) && Number.isFinite(todayOpen) && todayOpen > 0) {
       const openDiffPct = ((curPrice / todayOpen) - 1) * 100;
       const remVol = Math.max(0.25, dailyVol * Math.sqrt(Math.max(0.08, 1 - progress)));
-      const zOpen = openDiffPct / remVol;
-      const pFromOpen = sigmoid(zOpen * 1.35);
-      // 장 초반엔 기본 모델+선물 비중이 높고, 장 후반으로 갈수록 현재 시가 대비 위치 비중 상승
+      const pFromOpen = sigmoid((openDiffPct / remVol) * 1.35);
       const wOpen = 0.35 + 0.55 * progress;
       p = wOpen * pFromOpen + (1 - wOpen) * p;
       factors.push({ label: '현재 시가 대비 위치', val: Number(openDiffPct.toFixed(2)), unit: '%' });
@@ -1150,11 +1170,11 @@ function computePhaseForecast(baseP, opts) {
   if (p >= thr) dir = 'up';
   else if (p <= 1 - thr) dir = 'down';
 
+  const dirScore = Math.max(-100, Math.min(100, Math.round((p - 0.5) * 200)));
   const headlinePrefix = phase === 'preopen' ? '시초가는' : '시초가 대비';
   const subLabel = phase === 'preopen' ? '다음 거래일 시초가 방향' : '오늘 종가(시가 대비) 방향';
   const shortBadge = dir === 'up' ? '상승 예정' : dir === 'down' ? '하락 예정' : '관망 구간';
 
-  const dirScore = Math.max(-100, Math.min(100, Math.round((p - 0.5) * 200)));
   return {
     phase,
     p,

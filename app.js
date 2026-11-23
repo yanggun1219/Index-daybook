@@ -152,7 +152,8 @@ function computeActiveIndex() {
   const krFut = Number.isFinite(futObj.K200_pct) ? futObj.K200_pct : 0;
   const krBasis = Number.isFinite(futObj.K200_basis) ? futObj.K200_basis : 0;
   f = applyNewsOverlay(f, newsScore, key, true);
-  f = applyKrFuturesOverlay(f, krFut, krBasis, key, true);
+  const k200Fresh = typeof isK200DaySessionKst === 'function' ? isK200DaySessionKst(Date.now()) : true;
+  f = applyKrFuturesOverlay(f, krFut, krBasis, key, k200Fresh);
   if (typeof applyWeekendOilOverlay === 'function') {
     f = applyWeekendOilOverlay(f, futObj.CL_pct, Boolean(futObj.CL_weekend), true);
   }
@@ -168,6 +169,10 @@ function computeActiveIndex() {
     ? liveIdx.open
     : (state.liveCandles[key] && state.liveCandles[key].length ? state.liveCandles[key][state.liveCandles[key].length - 1][1] : null);
 
+  const liveNasdaqPct = state.liveIndices.NASDAQ && Number.isFinite(state.liveIndices.NASDAQ.pct) ? state.liveIndices.NASDAQ.pct : NaN;
+  const fxNow = state.liveIndices && Number.isFinite(state.liveIndices.USDKRW) ? state.liveIndices.USDKRW : NaN;
+  const prevFx = curRow && Number.isFinite(curRow[3]) && curRow[3] > 0 ? curRow[3] : NaN;
+  const fxPct = Number.isFinite(fxNow) && Number.isFinite(prevFx) ? ((fxNow / prevFx) - 1) * 100 : NaN;
   state.currentPhaseResult = computePhaseForecast(f ? f.p : 0.5, {
     phase: activePhase,
     isUs: key === 'NASDAQ',
@@ -178,7 +183,9 @@ function computeActiveIndex() {
     todayOpen,
     ewyPct: futObj.EWY_pct,
     nqPct: futObj.NQ_pct,
+    ixicPct: liveNasdaqPct,
     esPct: futObj.ES_pct,
+    fxPct,
     k200Pct: futObj.K200_pct
   });
 }
@@ -834,6 +841,7 @@ async function fetchStockData(query) {
       todayOpen: last && Number.isFinite(last[3]) ? last[3] : NaN,
       ewyPct: fut.EWY_pct,
       nqPct: fut.NQ_pct,
+      ixicPct: state.liveIndices.NASDAQ ? state.liveIndices.NASDAQ.pct : NaN,
       esPct: fut.ES_pct,
       k200Pct: fut.K200_pct,
       perpPct: data.perp ? data.perp.pct : NaN
