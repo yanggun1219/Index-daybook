@@ -8,6 +8,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Unzip android-widget
+        run: |
+          ZIP_FILE=$(find . -maxdepth 2 -name "android-widget*.zip" | head -n 1)
+          if [ -n "$ZIP_FILE" ]; then
+            unzip -o "$ZIP_FILE"
+          fi
+          ls -la android-widget
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
