@@ -45,8 +45,28 @@ const state = {
   stockError: '',
   stockPayload: null,
   stockAnalysis: null,
-  stockPhaseResult: null
+  stockPhaseResult: null,
+  scoreDeltas: {}
 };
+
+function recordScoreDelta(scoreKey, newScore) {
+  if (!Number.isFinite(newScore)) return null;
+  let store = {};
+  try {
+    const raw = safeRead('daybook_v8_prev_scores', '{}');
+    store = JSON.parse(raw) || {};
+  } catch (_) { store = {}; }
+  const prev = Number.isFinite(Number(store[scoreKey])) ? Number(store[scoreKey]) : null;
+  const delta = prev !== null ? newScore - prev : null;
+  if (delta !== null && delta !== 0) {
+    state.scoreDeltas[scoreKey] = delta;
+  } else if (state.scoreDeltas[scoreKey] === undefined) {
+    state.scoreDeltas[scoreKey] = delta;
+  }
+  store[scoreKey] = newScore;
+  try { safeWrite('daybook_v8_prev_scores', JSON.stringify(store)); } catch (_) {}
+  return state.scoreDeltas[scoreKey];
+}
 
 let toastTimer = null;
 function showToast(msg, isErr) {
@@ -652,12 +672,25 @@ function renderAll() {
 
   const subEl = document.getElementById('forecast-sub');
   const headEl = document.getElementById('forecast-headline');
+  const scoreBox = document.getElementById('score-box');
+  const scoreEl = document.getElementById('forecast-score');
+  const deltaEl = document.getElementById('forecast-delta');
+  scoreBox.style.backgroundColor = d ? 'rgba(255,255,255,0.08)' : '#FFFFFF';
+
   if (isStock && state.stockLoading) {
     subEl.textContent = '종목 데이터 분석 중';
     headEl.textContent = '잠시만 기다려 주세요...';
+    scoreEl.textContent = '-';
+    scoreEl.style.color = c.muted;
+    deltaEl.textContent = '계산 중';
+    deltaEl.style.color = c.muted;
   } else if (isStock && state.stockError) {
     subEl.textContent = '실시간 서버 연결 필요';
     headEl.textContent = '종목을 불러오지 못했습니다';
+    scoreEl.textContent = '-';
+    scoreEl.style.color = c.muted;
+    deltaEl.textContent = '-';
+    deltaEl.style.color = c.muted;
   } else if (pr) {
     subEl.textContent = pr.subLabel;
     if (dir === 'flat') {
@@ -666,9 +699,26 @@ function renderAll() {
       const word = dir === 'up' ? '상승' : '하락';
       headEl.innerHTML = `${pr.headlinePrefix} <span style="color:${sigColor}">${word}할 예정</span>입니다`;
     }
+    const sc = Number.isFinite(pr.dirScore) ? pr.dirScore : 0;
+    scoreEl.textContent = (sc > 0 ? '+' : '') + sc;
+    scoreEl.style.color = sc > 0 ? c.up : sc < 0 ? c.down : c.flat;
+
+    const sKey = (isStock && state.stockPayload ? state.stockPayload.symbol : state.tab) + ':' + pr.phase;
+    const dlt = state.scoreDeltas[sKey];
+    if (Number.isFinite(dlt) && dlt !== 0) {
+      deltaEl.textContent = (dlt > 0 ? '▲+' : '▼') + dlt;
+      deltaEl.style.color = dlt > 0 ? c.up : c.down;
+    } else {
+      deltaEl.textContent = '방향 점수';
+      deltaEl.style.color = c.muted;
+    }
   } else {
     subEl.textContent = '예측 준비';
     headEl.textContent = '데이터를 불러오는 중입니다';
+    scoreEl.textContent = '-';
+    scoreEl.style.color = c.muted;
+    deltaEl.textContent = '방향 점수';
+    deltaEl.style.color = c.muted;
   }
 
   // Chart card
@@ -735,7 +785,10 @@ async function fetchLiveMarketData(silent) {
       }
     }
     state.historyCache = {};
-    if (state.tab !== 'STOCK') computeActiveIndex();
+    if (state.tab !== 'STOCK') {
+      computeActiveIndex();
+      if (state.currentPhaseResult) recordScoreDelta(state.tab + ':' + state.currentPhaseResult.phase, state.currentPhaseResult.dirScore);
+    }
     renderAll();
     if (!silent) showToast('최신 시세와 야간 선행지표를 반영했습니다.');
   } catch (err) {
@@ -785,6 +838,7 @@ async function fetchStockData(query) {
       k200Pct: fut.K200_pct,
       perpPct: data.perp ? data.perp.pct : NaN
     });
+    if (state.stockPhaseResult) recordScoreDelta(data.symbol + ':' + state.stockPhaseResult.phase, state.stockPhaseResult.dirScore);
   } catch (err) {
     state.stockError = err.message || '종목 조회 실패';
   } finally {

@@ -4,7 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="theme-color" content="#FFFFFF" id="meta-theme-color" />
-  <title>지수 관측소 v8.0</title>
+  <title>지수 관측소 v8.1</title>
+  <link rel="icon" type="image/png" href="icon-512.png" />
+  <link rel="apple-touch-icon" href="icon-512.png" />
+  <link rel="manifest" href="manifest.json" />
   <script src="https://cdn.tailwindcss.com/3.4.17"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -107,12 +110,16 @@
         <!-- Small Open Reference Line -->
         <div id="hero-open-line" class="mt-2 text-xs font-semibold tabular opacity-75"></div>
 
-        <!-- BIG Bold Forecast Statement + Friendly Flat Icon -->
-        <div id="forecast-row" class="mt-5 pt-4 border-t flex items-center gap-3.5">
-          <div id="signal-icon-box" class="w-12 h-12 rounded-2xl flex items-center justify-center shrink-0"></div>
+        <!-- BIG Bold Forecast Statement + Direction Score (-100 ~ +100) & Delta -->
+        <div id="forecast-row" class="mt-5 pt-4 border-t flex items-center gap-3">
+          <div id="signal-icon-box" class="w-11 h-11 rounded-2xl flex items-center justify-center shrink-0"></div>
           <div class="min-w-0 flex-1">
             <div id="forecast-sub" class="text-[11px] font-bold opacity-65"></div>
-            <div id="forecast-headline" class="text-xl sm:text-2xl font-black tracking-tight leading-snug mt-0.5"></div>
+            <div id="forecast-headline" class="text-lg sm:text-[21px] font-black tracking-tight leading-snug mt-0.5"></div>
+          </div>
+          <div id="score-box" class="shrink-0 text-right px-3 py-2 rounded-2xl">
+            <div id="forecast-score" class="text-2xl sm:text-[26px] font-black tracking-tight tabular leading-none">0</div>
+            <div id="forecast-delta" class="text-[10px] font-extrabold tabular mt-1 leading-none opacity-75">방향 점수</div>
           </div>
         </div>
       </section>

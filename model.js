@@ -1154,10 +1154,12 @@ function computePhaseForecast(baseP, opts) {
   const subLabel = phase === 'preopen' ? '다음 거래일 시초가 방향' : '오늘 종가(시가 대비) 방향';
   const shortBadge = dir === 'up' ? '상승 예정' : dir === 'down' ? '하락 예정' : '관망 구간';
 
+  const dirScore = Math.max(-100, Math.min(100, Math.round((p - 0.5) * 200)));
   return {
     phase,
     p,
     dir,
+    dirScore,
     subLabel,
     headlinePrefix,
     shortBadge,
