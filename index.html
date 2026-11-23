@@ -1,214 +1,162 @@
-<!doctype html>
-<html lang="ko" class="dark">
+<!DOCTYPE html>
+<html lang="ko">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta id="theme-color-meta" name="theme-color" content="#070d19" />
-  <link rel="manifest" href="manifest.json" />
-  <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png" />
-  <link rel="apple-touch-icon" href="icon-512.png" />
-  <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-title" content="지수 관측소" />
-  <title>지수 관측소 v7.2 — 다크모드 · 실시간 시세 · 국내 속보</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#FFFFFF" id="meta-theme-color" />
+  <title>지수 관측소 v8.0</title>
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet" />
-  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
-  <script>
-    if (typeof tailwind !== 'undefined') {
-      tailwind.config = { darkMode: 'class' };
-    }
-  </script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800;900&display=swap" rel="stylesheet" />
   <style>
-    :root {
-      --bg-page: #f1f5f9;
-      --bg-card: #ffffff;
-      --bg-inset: #f8fafc;
-      --border-card: #e2e8f0;
-      --border-subtle: #f1f5f9;
-      --text-main: #0f172a;
-      --text-sub: #475569;
-      --text-muted: #64748b;
-      --up-color: #dc2626;
-      --down-color: #2563eb;
-    }
-    html.dark {
-      --bg-page: #070d19;
-      --bg-card: #0f172a;
-      --bg-inset: #162033;
-      --border-card: rgba(148, 163, 184, 0.16);
-      --border-subtle: rgba(148, 163, 184, 0.10);
-      --text-main: #f1f5f9;
-      --text-sub: #94a3b8;
-      --text-muted: #64748b;
-      --up-color: #fb7185;
-      --down-color: #60a5fa;
-    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
     body {
-      font-family: 'Inter', 'Noto Sans KR', system-ui, -apple-system, sans-serif;
-      background-color: var(--bg-page);
-      color: var(--text-main);
-      transition: background-color 0.25s ease, color 0.25s ease;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
+      margin: 0;
+      transition: background-color 0.2s ease, color 0.2s ease;
     }
-    html.dark body {
-      background-image: radial-gradient(ellipse 80% 45% at 50% -10%, rgba(20, 184, 166, 0.12), transparent 65%);
-      background-attachment: fixed;
-    }
-    .surface-card {
-      background-color: var(--bg-card);
-      border: 1px solid var(--border-card);
-      transition: background-color 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
-    }
-    .surface-inset {
-      background-color: var(--bg-inset);
-      border: 1px solid var(--border-subtle);
-    }
-
-    /* 1. 보드 생성 스태거 애니메이션 */
-    @keyframes boardFadeUp {
-      0% {
-        opacity: 0;
-        transform: translateY(14px) scale(0.985);
-      }
-      100% {
-        opacity: 1;
-        transform: translateY(0) scale(1);
-      }
-    }
-    .board-enter {
+    .tabular { font-variant-numeric: tabular-nums; }
+    .drawer-content {
+      max-height: 0;
+      overflow: hidden;
+      transition: max-height 0.32s ease, opacity 0.22s ease;
       opacity: 0;
-      animation: boardFadeUp 0.52s cubic-bezier(0.22, 1, 0.36, 1) forwards;
     }
-    .stagger-1 { animation-delay: 0ms; }
-    .stagger-2 { animation-delay: 65ms; }
-    .stagger-3 { animation-delay: 130ms; }
-    .stagger-4 { animation-delay: 195ms; }
-    .stagger-5 { animation-delay: 260ms; }
-    .stagger-6 { animation-delay: 325ms; }
-
-    /* 2. 그래프 왼쪽 -> 오른쪽 그려짐 애니메이션 (GPU clip-path) */
-    @keyframes chartRevealX {
-      0% {
-        clip-path: inset(0 100% 0 0);
-        opacity: 0.4;
-      }
-      100% {
-        clip-path: inset(0 0 0 0);
-        opacity: 1;
-      }
+    .drawer-content.open {
+      max-height: 2400px;
+      opacity: 1;
     }
-    .chart-reveal-anim {
-      animation: chartRevealX 0.72s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+    .candle-hit:hover { opacity: 0.78; cursor: pointer; }
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    #toast-box {
+      position: fixed;
+      left: 50%;
+      bottom: 22px;
+      transform: translateX(-50%) translateY(16px);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease, transform 0.2s ease;
+      z-index: 60;
     }
-
-    /* 3. 타일 미니 스파크라인 드로우 애니메이션 */
-    @keyframes sparkDraw {
-      from { stroke-dashoffset: 100; }
-      to { stroke-dashoffset: 0; }
-    }
-    .spark-path {
-      stroke-dasharray: 100;
-      stroke-dashoffset: 100;
-      animation: sparkDraw 0.85s cubic-bezier(0.22, 1, 0.36, 1) forwards;
-    }
-
-    /* 4. 시나리오 범위 바 확장 애니메이션 */
-    @keyframes barGrowX {
-      from { transform: scaleX(0); }
-      to { transform: scaleX(1); }
-    }
-    .bar-grow-left {
-      transform-origin: right center;
-      animation: barGrowX 0.65s cubic-bezier(0.22, 1, 0.36, 1) forwards;
-    }
-    .bar-grow-right {
-      transform-origin: left center;
-      animation: barGrowX 0.65s cubic-bezier(0.22, 1, 0.36, 1) forwards;
-    }
-
-    /* 5. 다크모드 기본 폼/슬라이더 스타일 */
-    html.dark select,
-    html.dark input[type="url"],
-    html.dark input[type="text"] {
-      background-color: #162033;
-      border-color: rgba(148, 163, 184, 0.25);
-      color: #f1f5f9;
-    }
-    html.dark input[type="range"] {
-      accent-color: #2dd4bf;
-    }
-    @media (prefers-reduced-motion: reduce) {
-      .board-enter, .chart-reveal-anim, .spark-path, .bar-grow-left, .bar-grow-right {
-        animation: none !important;
-        opacity: 1 !important;
-        clip-path: none !important;
-        stroke-dashoffset: 0 !important;
-      }
+    #toast-box.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
     }
   </style>
 </head>
 <body class="min-h-screen antialiased">
-  <main class="max-w-xl lg:max-w-5xl mx-auto px-4 pt-4 pb-16">
-    <header class="flex items-center justify-between gap-2 pb-3 border-b border-slate-200 dark:border-slate-800/90">
-      <div class="min-w-0">
-        <div class="flex items-center gap-1.5">
-          <span class="inline-block w-2 h-2 rounded-full bg-teal-500 dark:bg-teal-400 animate-pulse"></span>
-          <span class="text-[11px] font-bold text-teal-700 dark:text-teal-400 tracking-wider uppercase">INDEX DAYBOOK V7.2</span>
+  <div id="app-shell" class="min-h-screen pb-14 transition-colors duration-200">
+    <!-- Compact Top Bar -->
+    <header id="top-bar" class="sticky top-0 z-30 border-b backdrop-blur-md">
+      <div class="max-w-lg mx-auto px-4 py-3 flex items-center justify-between gap-2">
+        <div class="flex items-center gap-2.5">
+          <div id="brand-icon" class="w-8 h-8 rounded-xl flex items-center justify-center shrink-0"></div>
+          <div>
+            <div class="font-black text-[15px] tracking-tight leading-tight">지수 관측소</div>
+            <div id="header-stamp" class="text-[11px] font-semibold opacity-60 tabular leading-tight">종가 기준</div>
+          </div>
         </div>
-        <h1 class="text-xl font-extrabold tracking-tight text-slate-900 dark:text-white leading-tight">지수 관측소</h1>
+        <div class="flex items-center gap-1.5">
+          <button id="btn-live-refresh" class="px-3 py-1.5 rounded-full text-xs font-extrabold transition-colors">↻ 새로고침</button>
+          <button id="btn-theme-toggle" class="px-2.5 py-1.5 rounded-full text-xs font-extrabold transition-colors" aria-label="테마 전환">다크</button>
+        </div>
       </div>
-      <div class="flex items-center gap-1.5 shrink-0">
-        <button id="theme-toggle-btn" type="button" aria-label="다크모드 전환" title="다크/라이트 모드 전환" class="w-9 h-9 flex items-center justify-center rounded-xl bg-white dark:bg-slate-800/90 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-amber-300 shadow-sm hover:border-teal-500/60 transition text-sm">☀️</button>
-        <button id="live-fetch-btn" type="button" class="text-xs font-bold bg-teal-600 hover:bg-teal-500 text-white rounded-xl px-3 py-2 shadow-sm shadow-teal-900/20 transition whitespace-nowrap">실시간 조회</button>
-        <label for="date-select" class="sr-only">기준 종가 날짜</label>
-        <select id="date-select" class="text-xs font-semibold bg-white dark:bg-slate-800/90 border border-slate-300 dark:border-slate-700 rounded-xl px-2 py-2 text-slate-800 dark:text-slate-100 shadow-sm tabular-nums"></select>
+      <!-- Main 4 Tabs -->
+      <div class="max-w-lg mx-auto px-4 pb-3">
+        <div class="grid grid-cols-4 gap-1.5" role="tablist">
+          <button data-tab="KOSPI" class="main-tab py-2 rounded-xl text-xs font-extrabold transition-colors">코스피</button>
+          <button data-tab="KOSDAQ" class="main-tab py-2 rounded-xl text-xs font-extrabold transition-colors">코스닥</button>
+          <button data-tab="NASDAQ" class="main-tab py-2 rounded-xl text-xs font-extrabold transition-colors">나스닥</button>
+          <button data-tab="STOCK" class="main-tab py-2 rounded-xl text-xs font-extrabold transition-colors">종목 관측</button>
+        </div>
       </div>
     </header>
 
-    <div class="mt-3 flex flex-col sm:flex-row sm:items-center gap-2">
-      <nav id="market-tabs" aria-label="지수 선택" class="flex-1 flex gap-1.5 bg-slate-200/80 dark:bg-slate-900/90 border border-transparent dark:border-slate-800 p-1 rounded-xl"></nav>
-      <div id="horizon-tabs" aria-label="예측 기간 선택" class="sm:w-72 shrink-0 flex gap-1.5 bg-white dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800 p-1 rounded-xl">
-        <button type="button" data-h="1" aria-pressed="true">내일 (1거래일)</button>
-        <button type="button" data-h="5" aria-pressed="false">1주 추세 (5거래일)</button>
-      </div>
-    </div>
+    <!-- Main Content (Mobile-First Single Column, Wide Friendly) -->
+    <main class="max-w-lg mx-auto px-4 pt-4 space-y-4">
+      <!-- Stock Selector Bar (Visible only on STOCK tab) -->
+      <section id="stock-bar" class="hidden space-y-2.5">
+        <form id="stock-search-form" class="flex items-center gap-2">
+          <input id="stock-search-input" type="text" placeholder="종목명 · 6자리 코드 · 미국 티커 (예: SK하이닉스, NVDA)" class="flex-1 px-3.5 py-2.5 rounded-2xl text-xs font-bold outline-none transition-colors" />
+          <button id="stock-search-btn" type="submit" class="px-4 py-2.5 rounded-2xl text-xs font-extrabold shrink-0 transition-colors">조회</button>
+        </form>
+        <div id="stock-presets" class="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-0.5"></div>
+      </section>
 
-    <div id="view-tabs" role="tablist" aria-label="화면 전환" class="mt-3 flex border-b border-slate-200 dark:border-slate-800">
-      <button type="button" role="tab" data-tab="forecast" aria-selected="true">지수 전망</button>
-      <button type="button" role="tab" data-tab="stock" aria-selected="false">종목 관측</button>
-      <button type="button" role="tab" data-tab="simulator" aria-selected="false">시뮬레이터</button>
-      <button type="button" role="tab" data-tab="backtest" aria-selected="false">검증 · 데이터</button>
-    </div>
+      <!-- Soft Pastel Hero Card -->
+      <section id="hero-card" class="rounded-[28px] p-5 transition-all duration-200">
+        <div class="flex items-center justify-between gap-2 mb-3">
+          <span id="phase-pill" class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-extrabold"></span>
+          <button id="btn-phase-switch" class="text-[11px] font-extrabold underline underline-offset-2 opacity-70 hover:opacity-100"></button>
+        </div>
 
-    <div id="panel-forecast" class="mt-3">
-      <div id="forecast-content" aria-live="polite"></div>
-    </div>
+        <!-- Market/Stock Name + Live Status -->
+        <div class="flex items-center justify-between gap-2 mb-1">
+          <div id="hero-name" class="text-sm font-extrabold opacity-75">코스피</div>
+          <div id="hero-extra-tag" class="text-[11px] font-bold opacity-65"></div>
+        </div>
 
-    <div id="panel-stock" class="mt-3 hidden">
-      <div id="stock-content" aria-live="polite"></div>
-    </div>
+        <!-- BIG Current Price + Daily % -->
+        <div class="flex items-baseline gap-2.5 flex-wrap">
+          <span id="hero-price" class="text-4xl sm:text-[44px] font-black tracking-tight tabular leading-none">-</span>
+          <span id="hero-ret" class="text-sm font-extrabold tabular px-2.5 py-0.5 rounded-xl">-</span>
+        </div>
 
-    <div id="panel-simulator" class="mt-3 hidden">
-      <div id="simulator-content"></div>
-    </div>
+        <!-- Small Open Reference Line -->
+        <div id="hero-open-line" class="mt-2 text-xs font-semibold tabular opacity-75"></div>
 
-    <div id="panel-backtest" class="mt-3 hidden">
-      <div id="backtest-content"></div>
-    </div>
+        <!-- BIG Bold Forecast Statement + Friendly Flat Icon -->
+        <div id="forecast-row" class="mt-5 pt-4 border-t flex items-center gap-3.5">
+          <div id="signal-icon-box" class="w-12 h-12 rounded-2xl flex items-center justify-center shrink-0"></div>
+          <div class="min-w-0 flex-1">
+            <div id="forecast-sub" class="text-[11px] font-bold opacity-65"></div>
+            <div id="forecast-headline" class="text-xl sm:text-2xl font-black tracking-tight leading-snug mt-0.5"></div>
+          </div>
+        </div>
+      </section>
 
-    <details class="mt-4 rounded-2xl surface-card p-4 text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-      <summary class="font-bold text-slate-800 dark:text-slate-200 cursor-pointer">v7.2 모델 구조 및 면책 고지</summary>
-      <p class="mt-2">
-        코스피·코스닥은 시간감쇠(반감기 380거래일) 정규화 로지스틱 회귀와 나스닥×VIX 비선형 상호작용을 적용합니다. 나스닥 1거래일 모델은 과적합을 줄이기 위해 강한 L2 정규화로 분리하고, 미국 개장 전 마감한 한국장(코스피) 독자 변동분과 VIX/VIX3M 기간구조·유럽 DAX를 반영합니다. 고확신 구간은 코스피·코스닥 65%/35%, 나스닥 60%/40% 기준으로 선별 검증하며 표본이 20일 미만이면 관망으로 표시합니다.
-      </p>
-      <p class="mt-2">
-        본 프로그램은 과거 통계 기반의 참고 지표이며 특정 금융투자상품에 대한 매수·매도 권유가 아닙니다. 모든 투자 판단과 책임은 이용자 본인에게 있습니다.
-      </p>
-    </details>
-  </main>
+      <!-- Candlestick Chart Card (Default = Candle, Toggle = Line) -->
+      <section id="chart-card" class="rounded-[24px] p-4 transition-colors duration-200">
+        <div class="flex items-center justify-between gap-2 mb-3">
+          <div class="min-w-0">
+            <span class="text-xs font-extrabold">최근 흐름</span>
+            <span id="chart-readout" class="ml-2 text-[11px] font-semibold tabular opacity-65">봉을 눌러 시·종가 확인</span>
+          </div>
+          <div id="chart-mode-wrap" class="flex items-center gap-1 p-0.5 rounded-xl shrink-0">
+            <button id="btn-chart-candle" class="px-2.5 py-1 rounded-lg text-[11px] font-extrabold transition-colors">봉</button>
+            <button id="btn-chart-line" class="px-2.5 py-1 rounded-lg text-[11px] font-extrabold transition-colors">라인</button>
+          </div>
+        </div>
+        <div class="relative h-48 w-full">
+          <svg id="main-chart-svg" class="w-full h-full" viewBox="0 0 360 190" preserveAspectRatio="none"></svg>
+        </div>
+      </section>
 
-  <div id="toast" class="hidden" role="status" aria-live="polite"></div>
+      <!-- Collapsible Detailed Drawer (All Secondary Features Safely Tucked Inside) -->
+      <section>
+        <button id="btn-drawer-toggle" class="w-full py-3.5 px-4 rounded-2xl text-xs font-extrabold flex items-center justify-between transition-colors">
+          <span>상세 분석 · 선물 · 뉴스 · 시뮬레이터 · 검증</span>
+          <span id="drawer-arrow" class="text-sm transition-transform duration-200">▾</span>
+        </button>
+        <div id="drawer-body" class="drawer-content">
+          <div id="drawer-panel" class="mt-2.5 rounded-[24px] p-4 space-y-4">
+            <!-- Sub-tabs inside drawer -->
+            <div id="drawer-tabs" class="grid grid-cols-4 gap-1.5">
+              <button data-dtab="metrics" class="dtab-btn py-1.5 rounded-xl text-[11px] font-extrabold transition-colors">선물·지표</button>
+              <button data-dtab="news" class="dtab-btn py-1.5 rounded-xl text-[11px] font-extrabold transition-colors">국내 속보</button>
+              <button data-dtab="sim" class="dtab-btn py-1.5 rounded-xl text-[11px] font-extrabold transition-colors">시뮬레이터</button>
+              <button data-dtab="verify" class="dtab-btn py-1.5 rounded-xl text-[11px] font-extrabold transition-colors">검증·설정</button>
+            </div>
+            <div id="drawer-content-area" class="space-y-3 text-xs"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast-box" class="px-4 py-2.5 rounded-full text-xs font-extrabold shadow-lg"></div>
 
   <script src="data.js"></script>
   <script src="model.js"></script>

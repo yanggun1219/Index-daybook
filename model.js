@@ -1046,3 +1046,121 @@ function applyWeekendOilOverlay(forecast, clPct, isWeekend, enabled) {
     weekendOilImpactPct: Number(((adjP - forecast.p) * 100).toFixed(2))
   };
 }
+
+
+// ============================================================
+// v8.0 시간대별 시초가(장전) / 시초가 대비 종가(장중) 전용 예측 엔진
+// ============================================================
+function detectSessionPhase(marketKey, nowMs) {
+  const ms = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const isUs = marketKey === 'NASDAQ' || (typeof marketKey === 'string' && !marketKey.endsWith('.KS') && !marketKey.endsWith('.KQ') && marketKey !== 'KOSPI' && marketKey !== 'KOSDAQ');
+  if (!isUs) {
+    // 한국 정규장: 평일 KST 09:00 ~ 15:29
+    const kst = new Date(ms + 9 * 3600 * 1000);
+    const dow = kst.getUTCDay(); // 0=일, 6=토
+    const mins = kst.getUTCHours() * 60 + kst.getUTCMinutes();
+    if (dow >= 1 && dow <= 5 && mins >= 9 * 60 && mins < 15 * 60 + 30) {
+      const progress = Math.max(0.05, Math.min(0.95, (mins - 9 * 60) / 390));
+      return { phase: 'intraday', progress, label: '장중 · 오늘 종가 예측' };
+    }
+    return { phase: 'preopen', progress: 0, label: '장전 · 다음 시초가 예측' };
+  } else {
+    // 미국 정규장: 평일 ET 09:30 ~ 15:59 (3월~11월 초 EDT UTC-4, 그 외 EST UTC-5 근사)
+    const utc = new Date(ms);
+    const m = utc.getUTCMonth() + 1;
+    const etOffset = (m >= 4 && m <= 10) ? -4 : -5;
+    const et = new Date(ms + etOffset * 3600 * 1000);
+    const dow = et.getUTCDay();
+    const mins = et.getUTCHours() * 60 + et.getUTCMinutes();
+    if (dow >= 1 && dow <= 5 && mins >= 9 * 60 + 30 && mins < 16 * 60) {
+      const progress = Math.max(0.05, Math.min(0.95, (mins - 570) / 390));
+      return { phase: 'intraday', progress, label: '장중 · 오늘 종가 예측' };
+    }
+    return { phase: 'preopen', progress: 0, label: '장전 · 다음 시초가 예측' };
+  }
+}
+
+function computePhaseForecast(baseP, opts) {
+  const o = opts || {};
+  const phase = o.phase || 'preopen';
+  const isUs = Boolean(o.isUs);
+  const marketKey = o.marketKey || (isUs ? 'NASDAQ' : 'KOSPI');
+  let p = Number.isFinite(baseP) ? baseP : 0.5;
+  const factors = [];
+
+  if (phase === 'preopen') {
+    // 장전 시초가(갭) 예측: 야간 선행지표(EWY, NQ=F, K200, 24H 무기한) 반영 강화
+    let deltaLogit = 0;
+    if (!isUs) {
+      if (Number.isFinite(o.ewyPct) && Math.abs(o.ewyPct) >= 0.15) {
+        const d = Math.max(-0.55, Math.min(0.55, o.ewyPct * 0.22));
+        deltaLogit += d;
+        factors.push({ label: '야간 MSCI 한국(EWY)', val: o.ewyPct, unit: '%' });
+      }
+      if (Number.isFinite(o.nqPct) && Math.abs(o.nqPct) >= 0.15) {
+        const d = Math.max(-0.40, Math.min(0.40, o.nqPct * 0.16));
+        deltaLogit += d;
+        factors.push({ label: '나스닥100 선물(NQ)', val: o.nqPct, unit: '%' });
+      }
+      if (Number.isFinite(o.k200Pct) && Math.abs(o.k200Pct) >= 0.1) {
+        const d = Math.max(-0.45, Math.min(0.45, o.k200Pct * 0.18));
+        deltaLogit += d;
+        factors.push({ label: '코스피200 선물', val: o.k200Pct, unit: '%' });
+      }
+    } else {
+      if (Number.isFinite(o.nqPct) && Math.abs(o.nqPct) >= 0.1) {
+        const d = Math.max(-0.65, Math.min(0.65, o.nqPct * 0.28));
+        deltaLogit += d;
+        factors.push({ label: '나스닥100 선물(NQ)', val: o.nqPct, unit: '%' });
+      }
+      if (Number.isFinite(o.esPct) && Math.abs(o.esPct) >= 0.1) {
+        const d = Math.max(-0.30, Math.min(0.30, o.esPct * 0.14));
+        deltaLogit += d;
+        factors.push({ label: 'S&P500 선물(ES)', val: o.esPct, unit: '%' });
+      }
+    }
+    if (Number.isFinite(o.perpPct) && Math.abs(o.perpPct) >= 0.15) {
+      const d = Math.max(-0.45, Math.min(0.45, o.perpPct * 0.18));
+      deltaLogit += d;
+      factors.push({ label: '24H 무기한 선물', val: o.perpPct, unit: '%' });
+    }
+    const pc = Math.max(0.03, Math.min(0.97, p));
+    p = sigmoid(Math.log(pc / (1 - pc)) + deltaLogit);
+  } else {
+    // 장중 시초가 대비 종가(양봉/음봉) 예측: 현재 시가 대비 위치 + 남은 변동성 + 기본 모델 결합
+    const curPrice = o.curPrice;
+    const todayOpen = o.todayOpen;
+    const progress = Number.isFinite(o.progress) ? Math.max(0.05, Math.min(0.95, o.progress)) : 0.45;
+    const dailyVol = Number.isFinite(o.vol) && o.vol > 0.2 ? o.vol : 1.3;
+    if (Number.isFinite(curPrice) && Number.isFinite(todayOpen) && todayOpen > 0) {
+      const openDiffPct = ((curPrice / todayOpen) - 1) * 100;
+      const remVol = Math.max(0.25, dailyVol * Math.sqrt(Math.max(0.08, 1 - progress)));
+      const zOpen = openDiffPct / remVol;
+      const pFromOpen = sigmoid(zOpen * 1.35);
+      // 장 초반엔 기본 모델+선물 비중이 높고, 장 후반으로 갈수록 현재 시가 대비 위치 비중 상승
+      const wOpen = 0.35 + 0.55 * progress;
+      p = wOpen * pFromOpen + (1 - wOpen) * p;
+      factors.push({ label: '현재 시가 대비 위치', val: Number(openDiffPct.toFixed(2)), unit: '%' });
+    }
+  }
+
+  p = Math.max(0.04, Math.min(0.96, p));
+  const thr = marketKey === 'NASDAQ' ? 0.58 : 0.60;
+  let dir = 'flat';
+  if (p >= thr) dir = 'up';
+  else if (p <= 1 - thr) dir = 'down';
+
+  const headlinePrefix = phase === 'preopen' ? '시초가는' : '시초가 대비';
+  const subLabel = phase === 'preopen' ? '다음 거래일 시초가 방향' : '오늘 종가(시가 대비) 방향';
+  const shortBadge = dir === 'up' ? '상승 예정' : dir === 'down' ? '하락 예정' : '관망 구간';
+
+  return {
+    phase,
+    p,
+    dir,
+    subLabel,
+    headlinePrefix,
+    shortBadge,
+    factors
+  };
+}
