@@ -699,7 +699,7 @@ function renderAll() {
       const word = dir === 'up' ? '상승' : '하락';
       headEl.innerHTML = `${pr.headlinePrefix} <span style="color:${sigColor}">${word}할 예정</span>입니다`;
     }
-    const sc = Number.isFinite(pr.dirScore) ? pr.dirScore : 0;
+    const sc = Number.isFinite(pr.dirScore) ? pr.dirScore : (Number.isFinite(pr.p) ? Math.max(-100, Math.min(100, Math.round((pr.p - 0.5) * 200))) : 0);
     scoreEl.textContent = (sc > 0 ? '+' : '') + sc;
     scoreEl.style.color = sc > 0 ? c.up : sc < 0 ? c.down : c.flat;
 
@@ -787,7 +787,7 @@ async function fetchLiveMarketData(silent) {
     state.historyCache = {};
     if (state.tab !== 'STOCK') {
       computeActiveIndex();
-      if (state.currentPhaseResult) recordScoreDelta(state.tab + ':' + state.currentPhaseResult.phase, state.currentPhaseResult.dirScore);
+      if (state.currentPhaseResult) recordScoreDelta(state.tab + ':' + state.currentPhaseResult.phase, (Number.isFinite(state.currentPhaseResult.dirScore) ? state.currentPhaseResult.dirScore : Math.round((state.currentPhaseResult.p - 0.5) * 200)));
     }
     renderAll();
     if (!silent) showToast('최신 시세와 야간 선행지표를 반영했습니다.');
@@ -838,7 +838,7 @@ async function fetchStockData(query) {
       k200Pct: fut.K200_pct,
       perpPct: data.perp ? data.perp.pct : NaN
     });
-    if (state.stockPhaseResult) recordScoreDelta(data.symbol + ':' + state.stockPhaseResult.phase, state.stockPhaseResult.dirScore);
+    if (state.stockPhaseResult) recordScoreDelta(data.symbol + ':' + state.stockPhaseResult.phase, (Number.isFinite(state.stockPhaseResult.dirScore) ? state.stockPhaseResult.dirScore : Math.round((state.stockPhaseResult.p - 0.5) * 200)));
   } catch (err) {
     state.stockError = err.message || '종목 조회 실패';
   } finally {
