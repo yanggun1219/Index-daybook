@@ -35,6 +35,7 @@ const state = {
   liveUpdatedKst: '',
   liveIndices: {},
   liveCandles: {},
+  intradayTrail: {},
   currentForecast: null,
   currentPhaseResult: null,
   simValues: [],
@@ -48,6 +49,14 @@ const state = {
   stockPhaseResult: null,
   scoreDeltas: {}
 };
+
+function getScoreHistory(scoreKey) {
+  try {
+    const raw = safeRead('daybook_v8_score_hist', '{}');
+    const store = JSON.parse(raw) || {};
+    return Array.isArray(store[scoreKey]) ? store[scoreKey] : [];
+  } catch (_) { return []; }
+}
 
 function recordScoreDelta(scoreKey, newScore) {
   if (!Number.isFinite(newScore)) return null;
@@ -65,7 +74,130 @@ function recordScoreDelta(scoreKey, newScore) {
   }
   store[scoreKey] = newScore;
   try { safeWrite('daybook_v8_prev_scores', JSON.stringify(store)); } catch (_) {}
+
+  // Append to recent 10-point score history (dedup if unchanged within 10 min)
+  try {
+    const rawH = safeRead('daybook_v8_score_hist', '{}');
+    const hStore = JSON.parse(rawH) || {};
+    const list = Array.isArray(hStore[scoreKey]) ? hStore[scoreKey] : [];
+    const now = Date.now();
+    const last = list.length ? list[list.length - 1] : null;
+    if (!last || last.s !== newScore || (now - (last.t || 0)) >= 10 * 60 * 1000) {
+      list.push({ t: now, s: newScore });
+      hStore[scoreKey] = list.slice(-10);
+      safeWrite('daybook_v8_score_hist', JSON.stringify(hStore));
+    }
+  } catch (_) {}
   return state.scoreDeltas[scoreKey];
+}
+
+function renderScoreTrend(scoreKey, currentScore, c) {
+  const row = document.getElementById('score-trend-row');
+  const lbl = document.getElementById('score-trend-label');
+  const svg = document.getElementById('score-trend-svg');
+  if (!row || !lbl || !svg) return;
+  row.style.borderColor = state.dark ? 'rgba(255,255,255,0.07)' : 'rgba(15,23,42,0.07)';
+
+  // 1순위: 서버 30분봉(최근 5시간) 실제 시세 궤적으로 방향 점수 흐름 재현
+  let hist = [];
+  const trail = state.intradayTrail || {};
+  const isStock = state.tab === 'STOCK';
+  const baseP = isStock
+    ? (state.stockAnalysis ? state.stockAnalysis.p : 0.5)
+    : (state.currentForecast ? state.currentForecast.p : 0.5);
+  const pr = isStock ? state.stockPhaseResult : state.currentPhaseResult;
+  const phase = pr ? pr.phase : 'preopen';
+  const isUs = isStock ? (state.stockPayload && !state.stockPayload.isKr) : (state.tab === 'NASDAQ');
+
+  if (phase === 'preopen') {
+    const nqArr = Array.isArray(trail.NQ) ? trail.NQ : [];
+    const ewyArr = Array.isArray(trail.EWY) ? trail.EWY : [];
+    const len = isUs ? nqArr.length : Math.max(nqArr.length, ewyArr.length);
+    if (len >= 2 && typeof computePhaseForecast === 'function') {
+      for (let k = 0; k < len; k++) {
+        const nqV = nqArr.length ? nqArr[Math.min(nqArr.length - 1, Math.floor((k / len) * nqArr.length))] : NaN;
+        const ewyV = ewyArr.length ? ewyArr[Math.min(ewyArr.length - 1, Math.floor((k / len) * ewyArr.length))] : NaN;
+        const sim = computePhaseForecast(baseP, {
+          phase: 'preopen',
+          isUs,
+          isStock,
+          sector: isStock && state.stockPayload ? state.stockPayload.sector : undefined,
+          marketKey: isUs ? 'NASDAQ' : 'KOSPI',
+          nqPct: nqV,
+          ewyPct: ewyV
+        });
+        hist.push(sim.dirScore);
+      }
+      if (Number.isFinite(currentScore)) hist[hist.length - 1] = currentScore;
+    }
+  } else {
+    const ksArr = Array.isArray(trail.KOSPI) ? trail.KOSPI : [];
+    if (!isUs && !isStock && ksArr.length >= 2) {
+      const firstV = ksArr[0];
+      for (let k = 0; k < ksArr.length; k++) {
+        const rel = ksArr[k] - firstV;
+        const prog = 0.1 + 0.8 * (k / Math.max(1, ksArr.length - 1));
+        const pOpen = sigmoid((rel / 1.2) * 1.35);
+        const pMix = (0.35 + 0.55 * prog) * pOpen + (1 - (0.35 + 0.55 * prog)) * baseP;
+        hist.push(Math.max(-100, Math.min(100, Math.round((pMix - 0.5) * 200))));
+      }
+      if (Number.isFinite(currentScore)) hist[hist.length - 1] = currentScore;
+    }
+  }
+
+  // 2순위 폴백: 로컬 스냅샷 누적 기록
+  if (hist.length < 2) {
+    hist = getScoreHistory(scoreKey).map(x => Number(x.s)).filter(Number.isFinite);
+    if (!hist.length && Number.isFinite(currentScore)) hist.push(currentScore);
+  }
+  hist = hist.slice(-10);
+  if (!hist.length) {
+    lbl.textContent = '기록 대기';
+    lbl.style.color = c.muted;
+    svg.innerHTML = '';
+    return;
+  }
+
+  // Compute trend label from recent movement
+  let trendText = '첫 기록 저장됨';
+  let trendCol = c.muted;
+  if (hist.length >= 2) {
+    const first = hist[Math.max(0, hist.length - 4)];
+    const last = hist[hist.length - 1];
+    const diff = last - first;
+    if (diff >= 6) { trendText = '상승 힘 강화 ↗'; trendCol = c.up; }
+    else if (diff > 0) { trendText = '완만히 상승 ↗'; trendCol = c.up; }
+    else if (diff <= -6) { trendText = '하락 압력 확대 ↘'; trendCol = c.down; }
+    else if (diff < 0) { trendText = '완만히 하락 ↘'; trendCol = c.down; }
+    else { trendText = '흐름 유지 →'; trendCol = c.flat; }
+  }
+  lbl.textContent = trendText;
+  lbl.style.color = trendCol;
+
+  // Draw 0-centered mini bars (up to 10 slots, right-aligned so latest is always rightmost)
+  const W = 210, H = 36, midY = 18;
+  const slots = 10;
+  const step = W / slots;
+  const barW = 12;
+  const baseCol = state.dark ? 'rgba(255,255,255,0.16)' : 'rgba(15,23,42,0.16)';
+  let html = `<line x1="0" y1="${midY}" x2="${W}" y2="${midY}" stroke="${baseCol}" stroke-width="1" stroke-dasharray="3 3" />`;
+
+  const offset = slots - hist.length;
+  hist.forEach((sc, idx) => {
+    const slotIdx = offset + idx;
+    const x = slotIdx * step + (step - barW) / 2;
+    const mag = Math.max(3, (Math.abs(sc) / 100) * (midY - 3));
+    const y = sc >= 0 ? midY - mag : midY;
+    const isLatest = idx === hist.length - 1;
+    const col = sc > 0 ? c.up : sc < 0 ? c.down : c.flat;
+    const op = isLatest ? '1' : (0.38 + 0.45 * (idx / Math.max(1, hist.length - 1))).toFixed(2);
+    html += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW}" height="${mag.toFixed(1)}" rx="3" fill="${col}" opacity="${op}" />`;
+    if (isLatest) {
+      const dotY = sc >= 0 ? y - 1 : y + mag + 1;
+      html += `<circle cx="${(x + barW / 2).toFixed(1)}" cy="${Math.max(3, Math.min(H - 3, dotY)).toFixed(1)}" r="2.8" fill="${col}" />`;
+    }
+  });
+  svg.innerHTML = html;
 }
 
 let toastTimer = null;
@@ -217,9 +349,48 @@ function getCandlesForView() {
   });
 }
 
+function buildForecastCandle(candles, todayOpen, isIntraday) {
+  if (!candles.length) return null;
+  const isStock = state.tab === 'STOCK';
+  const pr = isStock ? state.stockPhaseResult : state.currentPhaseResult;
+  if (!pr) return null;
+  const lastClose = candles[candles.length - 1][4];
+  const basePrice = (isIntraday && Number.isFinite(todayOpen) && todayOpen > 0) ? todayOpen : lastClose;
+  if (!Number.isFinite(basePrice) || basePrice <= 0) return null;
+
+  let lowPct = -1.8;
+  let highPct = 1.8;
+  if (!isStock && state.currentForecast) {
+    if (Number.isFinite(state.currentForecast.low)) lowPct = state.currentForecast.low;
+    if (Number.isFinite(state.currentForecast.high)) highPct = state.currentForecast.high;
+  } else if (isStock && state.stockAnalysis) {
+    if (Number.isFinite(state.stockAnalysis.low)) lowPct = state.stockAnalysis.low;
+    if (Number.isFinite(state.stockAnalysis.high)) highPct = state.stockAnalysis.high;
+    else if (Number.isFinite(state.stockAnalysis.vol10)) {
+      lowPct = -1.28 * state.stockAnalysis.vol10;
+      highPct = 1.28 * state.stockAnalysis.vol10;
+    }
+  }
+  const sc = Number.isFinite(pr.dirScore) ? pr.dirScore : Math.round((pr.p - 0.5) * 200);
+  const span = Math.max(Math.abs(lowPct), Math.abs(highPct), 1.0);
+  const expPct = (sc / 100) * span * 0.45;
+  const predLow = basePrice * (1 + Math.min(lowPct, expPct) / 100);
+  const predHigh = basePrice * (1 + Math.max(highPct, expPct) / 100);
+  const predClose = basePrice * (1 + expPct / 100);
+  return {
+    open: basePrice,
+    high: predHigh,
+    low: predLow,
+    close: predClose,
+    lowPct,
+    highPct,
+    dir: pr.dir
+  };
+}
+
 function renderCandlestickChart(todayOpen, isIntraday) {
   const svg = document.getElementById('main-chart-svg');
-  const candles = getCandlesForView();
+  const candles = getCandlesForView().slice(-15);
   const c = getColors();
   const gridCol = state.dark ? '#252B38' : '#E5E7EB';
   const openCol = state.dark ? '#64748B' : '#94A3B8';
@@ -229,11 +400,17 @@ function renderCandlestickChart(todayOpen, isIntraday) {
     return;
   }
 
+  const fCandle = buildForecastCandle(candles, todayOpen, isIntraday);
+
   let minV = Infinity;
   let maxV = -Infinity;
   for (const row of candles) {
     if (row[3] < minV) minV = row[3];
     if (row[2] > maxV) maxV = row[2];
+  }
+  if (fCandle) {
+    if (fCandle.low < minV) minV = fCandle.low;
+    if (fCandle.high > maxV) maxV = fCandle.high;
   }
   if (isIntraday && Number.isFinite(todayOpen)) {
     if (todayOpen < minV) minV = todayOpen;
@@ -243,7 +420,7 @@ function renderCandlestickChart(todayOpen, isIntraday) {
   minV -= pad;
   maxV += pad;
 
-  const W = 360, H = 190, topP = 14, botP = 18, leftP = 8, rightP = 8;
+  const W = 360, H = 190, topP = 14, botP = 22, leftP = 8, rightP = 8;
   const plotW = W - leftP - rightP;
   const plotH = H - topP - botP;
   const yOf = v => topP + (1 - (v - minV) / (maxV - minV)) * plotH;
@@ -259,9 +436,11 @@ function renderCandlestickChart(todayOpen, isIntraday) {
     html += `<line x1="${leftP}" y1="${oy.toFixed(1)}" x2="${W - rightP}" y2="${oy.toFixed(1)}" stroke="${openCol}" stroke-width="1.2" stroke-dasharray="4 3" />`;
   }
 
-  const step = plotW / candles.length;
+  const totalSlots = candles.length + (fCandle ? 1.4 : 0);
+  const step = plotW / totalSlots;
+  const bodyW = Math.max(6, step * 0.56);
+
   if (state.chartType === 'candle') {
-    const bodyW = Math.max(6, step * 0.58);
     candles.forEach((row, idx) => {
       const [, o, h, l, cl] = row;
       const cx = leftP + idx * step + step / 2;
@@ -287,15 +466,43 @@ function renderCandlestickChart(todayOpen, isIntraday) {
     const lineCol = last[4] >= first[4] ? c.up : c.down;
     html += `<polyline fill="none" stroke="${lineCol}" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" points="${pts}" />`;
     const lx = leftP + (candles.length - 1) * step + step / 2;
-    html += `<circle cx="${lx.toFixed(1)}" cy="${yOf(last[4]).toFixed(1)}" r="4.5" fill="${lineCol}" />`;
+    html += `<circle cx="${lx.toFixed(1)}" cy="${yOf(last[4]).toFixed(1)}" r="4" fill="${lineCol}" />`;
+  }
+
+  // Rightmost Forecast Candle (80% min~max whiskers + translucent dashed body)
+  if (fCandle) {
+    const divX = leftP + candles.length * step + step * 0.12;
+    const fCx = leftP + (candles.length + 0.72) * step;
+    const fCol = fCandle.dir === 'up' ? c.up : fCandle.dir === 'down' ? c.down : c.flat;
+    const yH = yOf(fCandle.high);
+    const yL = yOf(fCandle.low);
+    const yTop = yOf(Math.max(fCandle.open, fCandle.close));
+    const yBot = yOf(Math.min(fCandle.open, fCandle.close));
+    const bh = Math.max(5, yBot - yTop);
+
+    html += `<line x1="${divX.toFixed(1)}" y1="${topP}" x2="${divX.toFixed(1)}" y2="${H - botP + 2}" stroke="${gridCol}" stroke-width="1.2" stroke-dasharray="3 3" />`;
+    html += `<g class="candle-hit" id="forecast-candle-hit">
+      <line x1="${fCx.toFixed(1)}" y1="${yH.toFixed(1)}" x2="${fCx.toFixed(1)}" y2="${yL.toFixed(1)}" stroke="${fCol}" stroke-width="1.8" stroke-dasharray="2.5 2.5" stroke-linecap="round" />
+      <line x1="${(fCx - 4.5).toFixed(1)}" y1="${yH.toFixed(1)}" x2="${(fCx + 4.5).toFixed(1)}" y2="${yH.toFixed(1)}" stroke="${fCol}" stroke-width="1.8" stroke-linecap="round" />
+      <line x1="${(fCx - 4.5).toFixed(1)}" y1="${yL.toFixed(1)}" x2="${(fCx + 4.5).toFixed(1)}" y2="${yL.toFixed(1)}" stroke="${fCol}" stroke-width="1.8" stroke-linecap="round" />
+      <rect x="${(fCx - bodyW / 2 - 1).toFixed(1)}" y="${yTop.toFixed(1)}" width="${(bodyW + 2).toFixed(1)}" height="${bh.toFixed(1)}" rx="3" fill="${fCol}" fill-opacity="0.22" stroke="${fCol}" stroke-width="1.8" stroke-dasharray="3 2" />
+      <text x="${fCx.toFixed(1)}" y="${H - 5}" text-anchor="middle" fill="${fCol}" font-size="10" font-weight="800">예측</text>
+    </g>`;
   }
 
   svg.innerHTML = html;
+  const dec = state.tab === 'STOCK' && state.stockPayload && state.stockPayload.currency === 'KRW' ? 0 : 2;
   svg.querySelectorAll('.candle-hit').forEach(el => {
+    if (el.id === 'forecast-candle-hit' && fCandle) {
+      el.addEventListener('click', () => {
+        document.getElementById('chart-readout').textContent =
+          `예상 ${fmtNum(fCandle.low, dec)} ~ ${fmtNum(fCandle.high, dec)} (${fmtSigned(fCandle.lowPct, '%')} ~ ${fmtSigned(fCandle.highPct, '%')})`;
+      });
+      return;
+    }
     el.addEventListener('click', () => {
       const row = candles[Number(el.dataset.idx)];
       if (!row) return;
-      const dec = state.tab === 'STOCK' && state.stockPayload && state.stockPayload.currency === 'KRW' ? 0 : 2;
       document.getElementById('chart-readout').textContent =
         `${row[0]} · 시가 ${fmtNum(row[1], dec)} · 종가 ${fmtNum(row[4], dec)}`;
     });
@@ -719,6 +926,7 @@ function renderAll() {
       deltaEl.textContent = '방향 점수';
       deltaEl.style.color = c.muted;
     }
+    renderScoreTrend(sKey, sc, c);
   } else {
     subEl.textContent = '예측 준비';
     headEl.textContent = '데이터를 불러오는 중입니다';
@@ -773,6 +981,7 @@ async function fetchLiveMarketData(silent) {
     if (data.news) state.marketsData.NEWS = data.news;
     if (data.indices) state.liveIndices = data.indices;
     if (data.candles) state.liveCandles = data.candles;
+    if (data.intradayTrail) state.intradayTrail = data.intradayTrail;
     state.liveUpdatedKst = data.updatedKst || '';
 
     const dateKst = data.dateKst || '';
@@ -835,6 +1044,8 @@ async function fetchStockData(query) {
       phase: activePhase,
       isUs: !data.isKr,
       marketKey: data.isKr ? 'KOSPI' : 'NASDAQ',
+      isStock: true,
+      sector: data.sector || 'general',
       progress: autoInfo.progress,
       vol: analysis ? analysis.vol10 : 2.1,
       curPrice: last ? last[1] : NaN,
@@ -897,6 +1108,8 @@ function bindEvents() {
         phase: state.phaseOverride,
         isUs: !data.isKr,
         marketKey: data.isKr ? 'KOSPI' : 'NASDAQ',
+        isStock: true,
+        sector: data.sector || 'general',
         progress: autoInfo.progress || 0.45,
         vol: state.stockAnalysis ? state.stockAnalysis.vol10 : 2.1,
         curPrice: last ? last[1] : NaN,

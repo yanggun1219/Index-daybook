@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="theme-color" content="#FFFFFF" id="meta-theme-color" />
-  <title>지수 관측소 v8.2</title>
+  <title>지수 관측소 v8.5</title>
   <link rel="icon" type="image/png" href="icon-512.png" />
   <link rel="apple-touch-icon" href="icon-512.png" />
   <link rel="manifest" href="manifest.json" />
@@ -122,6 +122,17 @@
             <div id="forecast-delta" class="text-[10px] font-extrabold tabular mt-1 leading-none opacity-75">방향 점수</div>
           </div>
         </div>
+
+        <!-- Score Momentum Trend Strip (0-centered mini bars) -->
+        <div id="score-trend-row" class="mt-3.5 pt-3 border-t flex items-center justify-between gap-3">
+          <div class="shrink-0">
+            <div class="text-[10px] font-bold opacity-60">점수 흐름 (30분 단위)</div>
+            <div id="score-trend-label" class="text-xs font-black mt-0.5">기록 누적 중</div>
+          </div>
+          <div class="flex-1 max-w-[210px] h-9">
+            <svg id="score-trend-svg" class="w-full h-full" viewBox="0 0 210 36" preserveAspectRatio="none"></svg>
+          </div>
+        </div>
       </section>
 
       <!-- Candlestick Chart Card (Default = Candle, Toggle = Line) -->
@@ -166,7 +177,7 @@
   <div id="toast-box" class="px-4 py-2.5 rounded-full text-xs font-extrabold shadow-lg"></div>
 
   <script src="data.js"></script>
-  <script src="model.js?v=820"></script>
-  <script src="app.js?v=820"></script>
+  <script src="model.js?v=850"></script>
+  <script src="app.js?v=850"></script>
 </body>
 </html>

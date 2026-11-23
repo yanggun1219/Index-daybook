@@ -1143,10 +1143,30 @@ function computePhaseForecast(baseP, opts) {
 
     if (wSum > 0) {
       const overnightSignal = sigSum / wSum; // 가중 평균 야간 등락률(%)
-      const pOvernight = sigmoid(overnightSignal * 0.95);
-      // 조용한 밤(|sig|<0.3%)엔 기존 모델 60~65% 유지, 급등락 밤(|sig|>=2%)엔 야간 갭 신호 최대 88% 주도
-      const wOvernight = Math.min(0.88, 0.35 + 0.28 * Math.abs(overnightSignal));
-      p = wOvernight * pOvernight + (1 - wOvernight) * p;
+      if (o.isStock) {
+        // 개별 종목: 업종별 야간 민감도(베타)와 최대 비중을 차등 적용해 종목 고유 모델(5년 학습) 개성 보존
+        const sec = o.sector || 'general';
+        const secCfg = {
+          semi:    { maxW: 0.56, beta: 0.85 },
+          us_semi: { maxW: 0.62, beta: 0.90 },
+          tech:    { maxW: 0.50, beta: 0.72 },
+          battery: { maxW: 0.50, beta: 0.72 },
+          us_ev:   { maxW: 0.58, beta: 0.82 },
+          auto:    { maxW: 0.44, beta: 0.58 },
+          ship:    { maxW: 0.42, beta: 0.52 },
+          bio:     { maxW: 0.38, beta: 0.45 },
+          fin:     { maxW: 0.36, beta: 0.42 },
+          general: { maxW: 0.42, beta: 0.50 }
+        }[sec] || { maxW: 0.42, beta: 0.50 };
+        const pOvernight = sigmoid(overnightSignal * 0.75 * secCfg.beta);
+        const wOvernight = Math.min(secCfg.maxW, 0.20 + 0.14 * Math.abs(overnightSignal));
+        p = wOvernight * pOvernight + (1 - wOvernight) * p;
+      } else {
+        const pOvernight = sigmoid(overnightSignal * 0.95);
+        // 지수: 조용한 밤(|sig|<0.3%)엔 기존 모델 60~65% 유지, 급등락 밤엔 야간 갭 신호 최대 88% 주도
+        const wOvernight = Math.min(0.88, 0.35 + 0.28 * Math.abs(overnightSignal));
+        p = wOvernight * pOvernight + (1 - wOvernight) * p;
+      }
     }
   } else {
     // 장중 시초가 대비 종가(양봉/음봉) 예측
