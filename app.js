@@ -1037,19 +1037,9 @@ function renderAll() {
     const ufx = isStock && state.stockPayload && state.stockPayload.currency === 'KRW' ? '원' : '';
 
     if (fcNow) {
-      if (dir === 'up') {
-        if (targetLblEl) targetLblEl.textContent = '예상 상단';
-        scoreEl.textContent = pfx + fmtNum(fcNow.high, decP) + ufx;
-        scoreEl.style.color = c.up;
-      } else if (dir === 'down') {
-        if (targetLblEl) targetLblEl.textContent = '예상 하단';
-        scoreEl.textContent = pfx + fmtNum(fcNow.low, decP) + ufx;
-        scoreEl.style.color = c.down;
-      } else {
-        if (targetLblEl) targetLblEl.textContent = '예상 중심';
-        scoreEl.textContent = pfx + fmtNum(fcNow.close, decP) + ufx;
-        scoreEl.style.color = c.flat;
-      }
+      if (targetLblEl) targetLblEl.textContent = phase === 'intraday' ? '예상 종가' : '예상 시초가';
+      scoreEl.textContent = pfx + fmtNum(fcNow.close, decP) + ufx;
+      scoreEl.style.color = dir === 'up' ? c.up : dir === 'down' ? c.down : c.flat;
     } else {
       if (targetLblEl) targetLblEl.textContent = '방향 점수';
       scoreEl.textContent = (sc > 0 ? '+' : '') + sc;
