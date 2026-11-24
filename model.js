@@ -1063,6 +1063,20 @@ function isK200DaySessionKst(nowMs) {
   return dow >= 1 && dow <= 5 && mins >= 8 * 60 + 45 && mins <= 15 * 60 + 45;
 }
 
+function isUsCashFreshForKrPreopen(nowMs) {
+  const ms = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const kst = new Date(ms + 9 * 3600 * 1000);
+  const dow = kst.getUTCDay(); // 0=일, 6=토
+  const mins = kst.getUTCHours() * 60 + kst.getUTCMinutes();
+  const m = kst.getUTCMonth() + 1;
+  const usOpenKstMins = (m >= 4 && m <= 10) ? (22 * 60 + 30) : (23 * 60 + 30);
+  // 평일 15:30 ~ 미국 개장(22:30/23:30 KST) 사이에는 EWY·^IXIC가 '어젯밤 미국장(이미 오늘 한국장에 반영됨)'이므로 제외!
+  if (dow >= 1 && dow <= 5 && mins >= 15 * 60 + 30 && mins < usOpenKstMins) {
+    return false;
+  }
+  return true;
+}
+
 function detectSessionPhase(marketKey, nowMs) {
   const ms = Number.isFinite(nowMs) ? nowMs : Date.now();
   const isUs = marketKey === 'NASDAQ' || (typeof marketKey === 'string' && !marketKey.endsWith('.KS') && !marketKey.endsWith('.KQ') && marketKey !== 'KOSPI' && marketKey !== 'KOSDAQ');
@@ -1113,18 +1127,19 @@ function computePhaseForecast(baseP, opts) {
     };
 
     if (!isUs) {
-      // 1) 미국장 나스닥 실시간(^IXIC)과 선물(NQ=F) 중 더 뚜렷한 최신 신호 채택
+      const usCashFresh = isUsCashFreshForKrPreopen(nowMs);
+      // 1) 미국 개장 전(15:30~23:30 KST)에는 어젯밤 EWY·^IXIC 중복 반영 차단 -> 실시간 NQ=F 선물만 사용
       let usTech = NaN;
-      if (Number.isFinite(o.ixicPct) && Number.isFinite(o.nqPct)) {
+      if (usCashFresh && Number.isFinite(o.ixicPct) && Number.isFinite(o.nqPct)) {
         usTech = Math.abs(o.ixicPct) >= Math.abs(o.nqPct) ? o.ixicPct : o.nqPct;
-      } else if (Number.isFinite(o.ixicPct)) {
+      } else if (usCashFresh && Number.isFinite(o.ixicPct)) {
         usTech = o.ixicPct;
       } else if (Number.isFinite(o.nqPct)) {
         usTech = o.nqPct;
       }
 
-      addSig(o.ewyPct, 0.45, '야간 MSCI 한국(EWY)');
-      addSig(usTech, 0.35, '미국 나스닥 실시간/선물');
+      if (usCashFresh) addSig(o.ewyPct, 0.45, '야간 MSCI 한국(EWY)');
+      addSig(usTech, usCashFresh ? 0.35 : 0.45, usCashFresh ? '미국 나스닥 실시간/선물' : '나스닥100 실시간 선물');
       addSig(o.esPct, 0.10, 'S&P500 선물(ES)');
       if (Number.isFinite(o.fxPct)) {
         // 원/달러 환율 하락(-)은 원화 강세(호재 +), 상승(+)은 원화 약세(악재 -)
