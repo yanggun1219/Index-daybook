@@ -1149,8 +1149,11 @@ function computePhaseForecast(baseP, opts) {
       if (isK200DaySessionKst(nowMs) && Number.isFinite(o.k200Pct)) {
         addSig(o.k200Pct, 0.55, '장전 코스피200 선물');
       }
+      if (usCashFresh && Number.isFinite(o.peerAvgPct)) {
+        addSig(o.peerAvgPct, 0.65, '업종 핵심 피어(SOX·NVDA 등)');
+      }
       if (Number.isFinite(o.perpPct)) {
-        addSig(o.perpPct, 0.50, '24H 무기한 선물');
+        addSig(o.perpPct, 0.55, '24H 무기한 선물');
       }
     } else {
       addSig(o.nqPct, 0.70, '나스닥100 선물(NQ)');
@@ -1166,19 +1169,25 @@ function computePhaseForecast(baseP, opts) {
         // 개별 종목: 업종별 야간 민감도(베타)와 최대 비중을 차등 적용해 종목 고유 모델(5년 학습) 개성 보존
         const sec = o.sector || 'general';
         const secCfg = {
-          semi:    { maxW: 0.56, beta: 0.85 },
-          us_semi: { maxW: 0.62, beta: 0.90 },
-          tech:    { maxW: 0.50, beta: 0.72 },
-          battery: { maxW: 0.50, beta: 0.72 },
-          us_ev:   { maxW: 0.58, beta: 0.82 },
-          auto:    { maxW: 0.44, beta: 0.58 },
-          ship:    { maxW: 0.42, beta: 0.52 },
-          bio:     { maxW: 0.38, beta: 0.45 },
-          fin:     { maxW: 0.36, beta: 0.42 },
-          general: { maxW: 0.42, beta: 0.50 }
-        }[sec] || { maxW: 0.42, beta: 0.50 };
-        const pOvernight = sigmoid(overnightSignal * 0.75 * secCfg.beta);
-        const wOvernight = Math.min(secCfg.maxW, 0.20 + 0.14 * Math.abs(overnightSignal));
+          semi:      { maxW: 0.82, beta: 0.95 },
+          us_semi:   { maxW: 0.84, beta: 0.98 },
+          us_tech:   { maxW: 0.78, beta: 0.90 },
+          us_crypto: { maxW: 0.84, beta: 0.98 },
+          tech:      { maxW: 0.72, beta: 0.82 },
+          battery:   { maxW: 0.72, beta: 0.82 },
+          us_ev:     { maxW: 0.80, beta: 0.92 },
+          auto:      { maxW: 0.62, beta: 0.68 },
+          ship:      { maxW: 0.58, beta: 0.62 },
+          bio:       { maxW: 0.54, beta: 0.55 },
+          us_bio:    { maxW: 0.68, beta: 0.78 },
+          fin:       { maxW: 0.52, beta: 0.52 },
+          us_fin:    { maxW: 0.68, beta: 0.78 },
+          us_energy: { maxW: 0.74, beta: 0.85 },
+          us_ind:    { maxW: 0.66, beta: 0.75 },
+          general:   { maxW: 0.58, beta: 0.62 }
+        }[sec] || { maxW: 0.58, beta: 0.62 };
+        const pOvernight = sigmoid(overnightSignal * 0.90 * secCfg.beta);
+        const wOvernight = Math.min(secCfg.maxW, 0.24 + 0.22 * Math.abs(overnightSignal));
         p = wOvernight * pOvernight + (1 - wOvernight) * p;
         expectedShiftPct = Math.max(-9, Math.min(9, overnightSignal * secCfg.beta * 0.75));
       } else {

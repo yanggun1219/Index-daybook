@@ -1146,6 +1146,20 @@ async function fetchLiveMarketData(silent) {
   }
 }
 
+function computeLatestPeerAvgPct(peers) {
+  if (!Array.isArray(peers) || !peers.length) return NaN;
+  const vals = [];
+  for (const pr of peers) {
+    if (!pr || pr.isLevel || pr.sym === 'KRW=X' || pr.sym === 'DX-Y.NYB' || pr.sym === '^KS11') continue;
+    const rows = pr.rows || [];
+    if (!rows.length) continue;
+    const lastPct = Number(rows[rows.length - 1][2]);
+    if (Number.isFinite(lastPct)) vals.push(lastPct);
+  }
+  if (!vals.length) return NaN;
+  return vals.reduce((a, b) => a + b, 0) / vals.length;
+}
+
 async function fetchStockData(query) {
   const q = String(query || '').trim();
   if (!q) return;
@@ -1158,13 +1172,27 @@ async function fetchStockData(query) {
   state.stockError = '';
   renderAll();
   try {
-    const res = await fetch(`${state.workerUrl.replace(/\/+$/, '')}/stock?q=${encodeURIComponent(q)}`);
+    const baseU = state.workerUrl.replace(/\/+$/, '');
+    const [res, liveRes] = await Promise.all([
+      fetch(`${baseU}/stock?q=${encodeURIComponent(q)}`),
+      fetch(`${baseU}/live`).catch(() => null)
+    ]);
+    if (liveRes && liveRes.ok) {
+      try {
+        const ld = await liveRes.json();
+        if (ld.futures) state.marketsData.FUTURES = ld.futures;
+        if (ld.indices) state.liveIndices = ld.indices;
+        if (ld.intradayTrail) state.intradayTrail = ld.intradayTrail;
+        if (ld.updatedKst) state.liveUpdatedKst = ld.updatedKst;
+      } catch (_) {}
+    }
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || '조회 실패');
     state.stockPayload = data;
     let analysis = typeof analyzeStockSeries === 'function' ? analyzeStockSeries(data) : null;
     if (analysis && data.perp && typeof applyStockPerpOverlay === 'function') {
-      analysis = applyStockPerpOverlay(analysis, data.perp, true);
+      analysis.perp = data.perp;
+      analysis = applyStockPerpOverlay(analysis, true);
     }
     state.stockAnalysis = analysis;
 
@@ -1187,6 +1215,7 @@ async function fetchStockData(query) {
       ixicPct: state.liveIndices.NASDAQ ? state.liveIndices.NASDAQ.pct : NaN,
       esPct: fut.ES_pct,
       k200Pct: fut.K200_pct,
+      peerAvgPct: computeLatestPeerAvgPct(data.peers),
       perpPct: data.perp ? data.perp.pct : NaN,
       investor: data.investor || null
     });
@@ -1253,6 +1282,7 @@ function bindEvents() {
         nqPct: fut.NQ_pct,
         esPct: fut.ES_pct,
         k200Pct: fut.K200_pct,
+        peerAvgPct: computeLatestPeerAvgPct(data.peers),
         perpPct: data.perp ? data.perp.pct : NaN,
         investor: data.investor || null
       });
