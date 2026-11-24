@@ -34,6 +34,7 @@ const state = {
   workerUrl: safeRead('daybook_worker_url', DEFAULT_WORKER_URL),
   liveUpdatedKst: '',
   liveIndices: {},
+  liveInvestors: {},
   liveCandles: {},
   intradayTrail: {},
   currentForecast: null,
@@ -318,7 +319,8 @@ function computeActiveIndex() {
     ixicPct: liveNasdaqPct,
     esPct: futObj.ES_pct,
     fxPct,
-    k200Pct: futObj.K200_pct
+    k200Pct: futObj.K200_pct,
+    investor: state.liveInvestors[key] || null
   });
 }
 
@@ -372,18 +374,22 @@ function buildForecastCandle(candles, todayOpen, isIntraday) {
     }
   }
   const sc = Number.isFinite(pr.dirScore) ? pr.dirScore : Math.round((pr.p - 0.5) * 200);
-  const span = Math.max(Math.abs(lowPct), Math.abs(highPct), 1.0);
-  const expPct = (sc / 100) * span * 0.45;
-  const predLow = basePrice * (1 + Math.min(lowPct, expPct) / 100);
-  const predHigh = basePrice * (1 + Math.max(highPct, expPct) / 100);
+  const shiftPct = Number.isFinite(pr.expectedShiftPct) ? pr.expectedShiftPct : 0;
+  const span = Math.max(Math.abs(lowPct), Math.abs(highPct), isStock ? 2.5 : 1.2);
+  // 장전 야간 갭/NXT 이동폭(shiftPct)을 중심에 반영해 실제 예상 범위가 현실적으로 따라오도록 보정
+  const adjLowPct = Math.min(lowPct + shiftPct * 0.75, shiftPct - span * 0.35);
+  const adjHighPct = Math.max(highPct + shiftPct * 0.75, shiftPct + span * 0.35);
+  const expPct = shiftPct + (sc / 100) * span * 0.35;
+  const predLow = basePrice * (1 + Math.min(adjLowPct, expPct) / 100);
+  const predHigh = basePrice * (1 + Math.max(adjHighPct, expPct) / 100);
   const predClose = basePrice * (1 + expPct / 100);
   return {
     open: basePrice,
     high: predHigh,
     low: predLow,
     close: predClose,
-    lowPct,
-    highPct,
+    lowPct: Number(adjLowPct.toFixed(2)),
+    highPct: Number(adjHighPct.toFixed(2)),
     dir: pr.dir
   };
 }
@@ -507,6 +513,106 @@ function renderCandlestickChart(todayOpen, isIntraday) {
         `${row[0]} · 시가 ${fmtNum(row[1], dec)} · 종가 ${fmtNum(row[4], dec)}`;
     });
   });
+}
+
+function renderContextPanel() {
+  const box = document.getElementById('context-panel');
+  if (!box) return;
+  const c = getColors();
+  box.style.backgroundColor = c.card;
+  box.style.border = `1px solid ${c.border}`;
+  const tileStyle = `background-color:${c.tile};`;
+
+  const fmtEok = (v) => {
+    if (!Number.isFinite(v)) return '-';
+    return (v > 0 ? '+' : '') + v.toLocaleString('ko-KR') + '억';
+  };
+  const fmtQty = (v) => {
+    if (!Number.isFinite(v)) return '-';
+    return (v > 0 ? '+' : '') + v.toLocaleString('ko-KR') + '주';
+  };
+
+  if (state.tab === 'NASDAQ') {
+    const fut = state.marketsData.FUTURES || {};
+    const fx = state.liveIndices && Number.isFinite(state.liveIndices.USDKRW) ? state.liveIndices.USDKRW : null;
+    const cards = [
+      { label: '야간 한국(EWY)', val: fmtSigned(fut.EWY_pct, '%'), sub: fut.EWY ? '$' + fmtNum(fut.EWY, 2) : '야간 대리지표', col: Number.isFinite(fut.EWY_pct) ? (fut.EWY_pct >= 0 ? c.up : c.down) : c.muted },
+      { label: '코스피200 선물', val: fmtSigned(fut.K200_pct, '%'), sub: fut.K200 ? fmtNum(fut.K200, 2) : '주간 기준', col: Number.isFinite(fut.K200_pct) ? (fut.K200_pct >= 0 ? c.up : c.down) : c.muted },
+      { label: '원/달러 환율', val: fx ? fmtNum(fx, 1) + '원' : '-', sub: '야간 외환', col: c.text }
+    ];
+    box.innerHTML = `<div class="flex items-center justify-between mb-2.5">
+        <span class="text-xs font-extrabold">한국장 야간 동향 (EWY · 선물 · 환율)</span>
+        <span class="text-[10px] font-bold opacity-55">야간선물 대리</span>
+      </div>
+      <div class="grid grid-cols-3 gap-2 text-center">${cards.map(it =>
+        `<div class="p-2.5 rounded-2xl" style="${tileStyle}">
+          <div class="text-[10px] font-bold opacity-65 truncate">${it.label}</div>
+          <div class="text-sm font-black tabular mt-0.5" style="color:${it.col}">${it.val}</div>
+          <div class="text-[10px] font-semibold opacity-55 tabular mt-0.5">${it.sub}</div>
+        </div>`
+      ).join('')}</div>`;
+    return;
+  }
+
+  if (state.tab === 'STOCK') {
+    const sp = state.stockPayload;
+    if (!sp || !sp.isKr) {
+      const perp = sp && sp.perp;
+      box.innerHTML = `<div class="flex items-center justify-between mb-2">
+          <span class="text-xs font-extrabold">미국 종목 실시간 보조 지표</span>
+          <span class="text-[10px] font-bold opacity-55">24H 무기한</span>
+        </div>
+        <div class="p-3 rounded-2xl flex items-center justify-between text-xs" style="${tileStyle}">
+          <span class="font-bold opacity-75">${perp ? perp.symbol : '24H 무기한 선물'}</span>
+          <span class="font-black tabular" style="color:${perp ? (perp.pct >= 0 ? c.up : c.down) : c.muted}">${perp ? '$' + fmtNum(perp.price, 2) + ' (' + fmtSigned(perp.pct, '%') + ')' : '조회 대기'}</span>
+        </div>`;
+      return;
+    }
+    const inv = sp.investor;
+    const fCol = inv && Number.isFinite(inv.frgnQty) ? (inv.frgnQty >= 0 ? c.up : c.down) : c.muted;
+    const oCol = inv && Number.isFinite(inv.orgnQty) ? (inv.orgnQty >= 0 ? c.up : c.down) : c.muted;
+    box.innerHTML = `<div class="flex items-center justify-between mb-2.5">
+        <span class="text-xs font-extrabold">실시간 종목 수급 추정</span>
+        <span class="text-[10px] font-bold opacity-55">${sp.sessionTag || 'KRX·NXT 통합'}</span>
+      </div>
+      <div class="grid grid-cols-2 gap-2 text-center">
+        <div class="p-2.5 rounded-2xl" style="${tileStyle}">
+          <div class="text-[10px] font-bold opacity-65">외국인 (가집계)</div>
+          <div class="text-sm font-black tabular mt-0.5" style="color:${fCol}">${inv ? fmtQty(inv.frgnQty) : '집계 대기'}</div>
+        </div>
+        <div class="p-2.5 rounded-2xl" style="${tileStyle}">
+          <div class="text-[10px] font-bold opacity-65">기관 (가집계)</div>
+          <div class="text-sm font-black tabular mt-0.5" style="color:${oCol}">${inv ? fmtQty(inv.orgnQty) : '집계 대기'}</div>
+        </div>
+      </div>`;
+    return;
+  }
+
+  // KOSPI / KOSDAQ Investor Breakdown (외국인·기관·개인 + 연기금·금융투자·투신)
+  const inv = state.liveInvestors[state.tab];
+  const topRow = [
+    { label: '외국인', val: inv ? inv.frgn : NaN },
+    { label: '기관 합계', val: inv ? inv.orgn : NaN },
+    { label: '개인', val: inv ? inv.prsn : NaN }
+  ];
+  const subRow = [
+    { label: '연기금', val: inv ? inv.fund : NaN },
+    { label: '금융투자', val: inv ? inv.scrt : NaN },
+    { label: '투신', val: inv ? inv.ivtr : NaN }
+  ];
+  const mkTile = (it) => {
+    const col = Number.isFinite(it.val) ? (it.val > 0 ? c.up : it.val < 0 ? c.down : c.flat) : c.muted;
+    return `<div class="p-2.5 rounded-2xl text-center" style="${tileStyle}">
+      <div class="text-[10px] font-bold opacity-65">${it.label}</div>
+      <div class="text-xs sm:text-sm font-black tabular mt-0.5" style="color:${col}">${fmtEok(it.val)}</div>
+    </div>`;
+  };
+  box.innerHTML = `<div class="flex items-center justify-between mb-2.5">
+      <span class="text-xs font-extrabold">${MARKET_LABELS[state.tab]} 수급 주체별 동향</span>
+      <span class="text-[10px] font-bold opacity-55">${inv ? '실시간 (억원)' : '장중 집계 대기'}</span>
+    </div>
+    <div class="grid grid-cols-3 gap-2">${topRow.map(mkTile).join('')}</div>
+    <div class="grid grid-cols-3 gap-2 mt-2">${subRow.map(mkTile).join('')}</div>`;
 }
 
 function renderDrawer() {
@@ -809,7 +915,7 @@ function renderAll() {
       retVal = last[2];
       todayOpen = Number.isFinite(last[3]) ? last[3] : NaN;
       priceStr = (isKrw ? '' : '$') + fmtNum(curPrice, isKrw ? 0 : 2) + unit;
-      extraTag = sp.sectorLabel || sp.symbol;
+      extraTag = (sp.sessionTag ? sp.sessionTag + ' · ' : '') + (sp.sectorLabel || sp.symbol);
       pr = state.stockPhaseResult;
     }
   }
@@ -914,17 +1020,42 @@ function renderAll() {
       headEl.innerHTML = `${pr.headlinePrefix} <span style="color:${sigColor}">${word}할 예정</span>입니다`;
     }
     const sc = Number.isFinite(pr.dirScore) ? pr.dirScore : (Number.isFinite(pr.p) ? Math.max(-100, Math.min(100, Math.round((pr.p - 0.5) * 200))) : 0);
-    scoreEl.textContent = (sc > 0 ? '+' : '') + sc;
-    scoreEl.style.color = sc > 0 ? c.up : sc < 0 ? c.down : c.flat;
+    const candlesNow = getCandlesForView().slice(-15);
+    const fcNow = buildForecastCandle(candlesNow, todayOpen, phase === 'intraday');
+    const targetLblEl = document.getElementById('forecast-target-lbl');
+    const decP = isStock && state.stockPayload && state.stockPayload.currency === 'KRW' ? 0 : 2;
+    const pfx = isStock && state.stockPayload && state.stockPayload.currency !== 'KRW' ? '$' : '';
+    const ufx = isStock && state.stockPayload && state.stockPayload.currency === 'KRW' ? '원' : '';
+
+    if (fcNow) {
+      if (dir === 'up') {
+        if (targetLblEl) targetLblEl.textContent = '예상 상단';
+        scoreEl.textContent = pfx + fmtNum(fcNow.high, decP) + ufx;
+        scoreEl.style.color = c.up;
+      } else if (dir === 'down') {
+        if (targetLblEl) targetLblEl.textContent = '예상 하단';
+        scoreEl.textContent = pfx + fmtNum(fcNow.low, decP) + ufx;
+        scoreEl.style.color = c.down;
+      } else {
+        if (targetLblEl) targetLblEl.textContent = '예상 중심';
+        scoreEl.textContent = pfx + fmtNum(fcNow.close, decP) + ufx;
+        scoreEl.style.color = c.flat;
+      }
+    } else {
+      if (targetLblEl) targetLblEl.textContent = '방향 점수';
+      scoreEl.textContent = (sc > 0 ? '+' : '') + sc;
+      scoreEl.style.color = sc > 0 ? c.up : sc < 0 ? c.down : c.flat;
+    }
 
     const sKey = (isStock && state.stockPayload ? state.stockPayload.symbol : state.tab) + ':' + pr.phase;
     const dlt = state.scoreDeltas[sKey];
+    const scTxt = (sc > 0 ? '+' : '') + sc + '점';
     if (Number.isFinite(dlt) && dlt !== 0) {
-      deltaEl.textContent = (dlt > 0 ? '▲+' : '▼') + dlt;
+      deltaEl.textContent = `${scTxt} (${dlt > 0 ? '▲+' : '▼'}${dlt})`;
       deltaEl.style.color = dlt > 0 ? c.up : c.down;
     } else {
-      deltaEl.textContent = '방향 점수';
-      deltaEl.style.color = c.muted;
+      deltaEl.textContent = `방향 ${scTxt}`;
+      deltaEl.style.color = sc > 0 ? c.up : sc < 0 ? c.down : c.muted;
     }
     renderScoreTrend(sKey, sc, c);
   } else {
@@ -949,6 +1080,7 @@ function renderAll() {
     b.style.color = on ? c.text : c.muted;
   });
   renderCandlestickChart(todayOpen, phase === 'intraday');
+  renderContextPanel();
 
   // Drawer
   const dBtn = document.getElementById('btn-drawer-toggle');
@@ -980,6 +1112,7 @@ async function fetchLiveMarketData(silent) {
     if (data.futures) state.marketsData.FUTURES = data.futures;
     if (data.news) state.marketsData.NEWS = data.news;
     if (data.indices) state.liveIndices = data.indices;
+    if (data.investors) state.liveInvestors = data.investors;
     if (data.candles) state.liveCandles = data.candles;
     if (data.intradayTrail) state.intradayTrail = data.intradayTrail;
     state.liveUpdatedKst = data.updatedKst || '';
@@ -1055,7 +1188,8 @@ async function fetchStockData(query) {
       ixicPct: state.liveIndices.NASDAQ ? state.liveIndices.NASDAQ.pct : NaN,
       esPct: fut.ES_pct,
       k200Pct: fut.K200_pct,
-      perpPct: data.perp ? data.perp.pct : NaN
+      perpPct: data.perp ? data.perp.pct : NaN,
+      investor: data.investor || null
     });
     if (state.stockPhaseResult) recordScoreDelta(data.symbol + ':' + state.stockPhaseResult.phase, (Number.isFinite(state.stockPhaseResult.dirScore) ? state.stockPhaseResult.dirScore : Math.round((state.stockPhaseResult.p - 0.5) * 200)));
   } catch (err) {
@@ -1118,7 +1252,8 @@ function bindEvents() {
         nqPct: fut.NQ_pct,
         esPct: fut.ES_pct,
         k200Pct: fut.K200_pct,
-        perpPct: data.perp ? data.perp.pct : NaN
+        perpPct: data.perp ? data.perp.pct : NaN,
+        investor: data.investor || null
       });
     } else {
       computeActiveIndex();

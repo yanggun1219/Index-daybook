@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="theme-color" content="#FFFFFF" id="meta-theme-color" />
-  <title>지수 관측소 v8.5</title>
+  <title>지수 관측소 v9.0</title>
   <link rel="icon" type="image/png" href="icon-512.png" />
   <link rel="apple-touch-icon" href="icon-512.png" />
   <link rel="manifest" href="manifest.json" />
@@ -115,11 +115,12 @@
           <div id="signal-icon-box" class="w-11 h-11 rounded-2xl flex items-center justify-center shrink-0"></div>
           <div class="min-w-0 flex-1">
             <div id="forecast-sub" class="text-[11px] font-bold opacity-65"></div>
-            <div id="forecast-headline" class="text-lg sm:text-[21px] font-black tracking-tight leading-snug mt-0.5"></div>
+            <div id="forecast-headline" class="text-[16px] sm:text-[18px] font-black tracking-tight leading-snug mt-0.5 break-keep"></div>
           </div>
           <div id="score-box" class="shrink-0 text-right px-3 py-2 rounded-2xl">
-            <div id="forecast-score" class="text-2xl sm:text-[26px] font-black tracking-tight tabular leading-none">0</div>
-            <div id="forecast-delta" class="text-[10px] font-extrabold tabular mt-1 leading-none opacity-75">방향 점수</div>
+            <div id="forecast-target-lbl" class="text-[10px] font-bold opacity-65 leading-none">예상 가격</div>
+            <div id="forecast-score" class="text-lg sm:text-xl font-black tracking-tight tabular leading-tight mt-1">-</div>
+            <div id="forecast-delta" class="text-[10px] font-extrabold tabular mt-0.5 leading-none opacity-80">방향 점수</div>
           </div>
         </div>
 
@@ -152,6 +153,9 @@
         </div>
       </section>
 
+      <!-- Context Panel: KR Live Investor Breakdown (incl. 연기금·금투·투신) / NASDAQ Overnight Korea Panel -->
+      <section id="context-panel" class="rounded-[24px] p-4 transition-colors duration-200"></section>
+
       <!-- Collapsible Detailed Drawer (All Secondary Features Safely Tucked Inside) -->
       <section>
         <button id="btn-drawer-toggle" class="w-full py-3.5 px-4 rounded-2xl text-xs font-extrabold flex items-center justify-between transition-colors">
@@ -177,7 +181,7 @@
   <div id="toast-box" class="px-4 py-2.5 rounded-full text-xs font-extrabold shadow-lg"></div>
 
   <script src="data.js"></script>
-  <script src="model.js?v=850"></script>
-  <script src="app.js?v=850"></script>
+  <script src="model.js?v=900"></script>
+  <script src="app.js?v=900"></script>
 </body>
 </html>

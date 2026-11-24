@@ -988,6 +988,9 @@ function analyzeIndividualStock(payload) {
     recentRows: rows.slice(-30),
     perp: payload.perp || null,
     news: Array.isArray(payload.news) ? payload.news : [],
+    vol10: Number((latest.vol10 || 2.2).toFixed(2)),
+    low: Number((-1.28 * Math.max(0.8, latest.vol10 || 2.2)).toFixed(2)),
+    high: Number((1.28 * Math.max(0.8, latest.vol10 || 2.2)).toFixed(2)),
     backtest: {
       n: evalN,
       trainN: trainAll.length,
@@ -1094,6 +1097,7 @@ function computePhaseForecast(baseP, opts) {
   const marketKey = o.marketKey || (isUs ? 'NASDAQ' : 'KOSPI');
   const nowMs = Number.isFinite(o.nowMs) ? o.nowMs : Date.now();
   let p = Number.isFinite(baseP) ? baseP : 0.5;
+  let expectedShiftPct = 0;
   const factors = [];
 
   if (phase === 'preopen') {
@@ -1161,11 +1165,13 @@ function computePhaseForecast(baseP, opts) {
         const pOvernight = sigmoid(overnightSignal * 0.75 * secCfg.beta);
         const wOvernight = Math.min(secCfg.maxW, 0.20 + 0.14 * Math.abs(overnightSignal));
         p = wOvernight * pOvernight + (1 - wOvernight) * p;
+        expectedShiftPct = Math.max(-9, Math.min(9, overnightSignal * secCfg.beta * 0.75));
       } else {
         const pOvernight = sigmoid(overnightSignal * 0.95);
         // 지수: 조용한 밤(|sig|<0.3%)엔 기존 모델 60~65% 유지, 급등락 밤엔 야간 갭 신호 최대 88% 주도
         const wOvernight = Math.min(0.88, 0.35 + 0.28 * Math.abs(overnightSignal));
         p = wOvernight * pOvernight + (1 - wOvernight) * p;
+        expectedShiftPct = Math.max(-6, Math.min(6, overnightSignal * 0.65));
       }
     }
   } else {
@@ -1181,6 +1187,28 @@ function computePhaseForecast(baseP, opts) {
       const wOpen = 0.35 + 0.55 * progress;
       p = wOpen * pFromOpen + (1 - wOpen) * p;
       factors.push({ label: '현재 시가 대비 위치', val: Number(openDiffPct.toFixed(2)), unit: '%' });
+      expectedShiftPct = openDiffPct;
+    }
+    // 장중 실시간 외국인 + 기관 수급 반영
+    const inv = o.investor;
+    if (inv && typeof inv === 'object') {
+      let flowLogit = 0;
+      if (Number.isFinite(inv.frgn) || Number.isFinite(inv.orgn)) {
+        const net = (Number(inv.frgn) || 0) + (Number(inv.orgn) || 0);
+        const scaleEok = marketKey === 'KOSDAQ' ? 1000 : 3000;
+        flowLogit = Math.max(-0.55, Math.min(0.55, (net / scaleEok) * 0.40));
+        if (Math.abs(net) >= 50) factors.push({ label: '장중 외인+기관 수급', val: net, unit: '억' });
+      } else if (Number.isFinite(inv.frgnQty) || Number.isFinite(inv.orgnQty)) {
+        const netQ = (Number(inv.frgnQty) || 0) + (Number(inv.orgnQty) || 0);
+        if (netQ !== 0) {
+          flowLogit = Math.max(-0.35, Math.min(0.35, Math.sign(netQ) * Math.min(0.35, Math.log10(Math.abs(netQ) + 10) * 0.07)));
+          factors.push({ label: '장중 외인+기관 추정', val: netQ, unit: '주' });
+        }
+      }
+      if (flowLogit !== 0) {
+        const pc = Math.max(0.03, Math.min(0.97, p));
+        p = sigmoid(Math.log(pc / (1 - pc)) + flowLogit);
+      }
     }
   }
 
@@ -1200,6 +1228,7 @@ function computePhaseForecast(baseP, opts) {
     p,
     dir,
     dirScore,
+    expectedShiftPct: Number(expectedShiftPct.toFixed(2)),
     subLabel,
     headlinePrefix,
     shortBadge,
