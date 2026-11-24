@@ -48,7 +48,9 @@ const state = {
   stockPayload: null,
   stockAnalysis: null,
   stockPhaseResult: null,
-  scoreDeltas: {}
+  scoreDeltas: {},
+  autoLive: safeRead('daybook_v9_autolive', '1') === '1',
+  lastTickPrice: null
 };
 
 function getScoreHistory(scoreKey) {
@@ -837,6 +839,13 @@ function renderAll() {
   themeBtn.style.color = c.text;
   themeBtn.style.border = `1px solid ${c.border}`;
 
+  const autoBtn = document.getElementById('btn-auto-live');
+  if (autoBtn) {
+    autoBtn.textContent = state.autoLive ? '● LIVE' : '○ 정지';
+    autoBtn.style.backgroundColor = state.autoLive ? (d ? '#281820' : '#FFF1F2') : c.tile;
+    autoBtn.style.color = state.autoLive ? c.up : c.muted;
+    autoBtn.style.border = `1px solid ${state.autoLive ? c.up + '55' : c.border}`;
+  }
   const refBtn = document.getElementById('btn-live-refresh');
   refBtn.style.backgroundColor = c.tile;
   refBtn.style.color = c.text;
@@ -1104,7 +1113,7 @@ function renderAll() {
 async function fetchLiveMarketData(silent) {
   if (!state.workerUrl) return;
   const btn = document.getElementById('btn-live-refresh');
-  if (btn) { btn.disabled = true; btn.textContent = '↻ 갱신 중'; }
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
   try {
     const res = await fetch(state.workerUrl.replace(/\/+$/, '') + '/live');
     if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -1143,7 +1152,7 @@ async function fetchLiveMarketData(silent) {
   } catch (err) {
     if (!silent) showToast('실시간 연결 지연: 기본 수록 데이터로 표시합니다.', true);
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '↻ 새로고침'; }
+    if (btn) { btn.disabled = false; btn.textContent = '↻'; }
   }
 }
 
@@ -1205,6 +1214,8 @@ function bindEvents() {
     btn.addEventListener('click', () => {
       state.tab = btn.dataset.tab;
       state.phaseOverride = null;
+      state.lastTickPrice = null;
+      scheduleLiveLoops();
       document.getElementById('chart-readout').textContent = '봉을 눌러 시·종가 확인';
       if (state.tab === 'STOCK') {
         document.getElementById('stock-search-input').value = state.stockQuery;
@@ -1285,6 +1296,26 @@ function bindEvents() {
     });
   });
 
+  const autoBtn = document.getElementById('btn-auto-live');
+  if (autoBtn) {
+    autoBtn.addEventListener('click', () => {
+      state.autoLive = !state.autoLive;
+      safeWrite('daybook_v9_autolive', state.autoLive ? '1' : '0');
+      renderAll();
+      scheduleLiveLoops();
+      showToast(state.autoLive ? '실시간 자동 갱신 ON (시세 1.5초 · 전체 15초)' : '실시간 자동 갱신을 일시정지했습니다.');
+    });
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
+      if (fullRefreshTimer) { clearInterval(fullRefreshTimer); fullRefreshTimer = null; }
+    } else if (state.autoLive) {
+      runSingleTick();
+      scheduleLiveLoops();
+    }
+  });
+
   document.getElementById('stock-search-form').addEventListener('submit', e => {
     e.preventDefault();
     const val = (document.getElementById('stock-search-input').value || '').trim();
@@ -1295,11 +1326,119 @@ function bindEvents() {
   });
 }
 
+
+let tickTimer = null;
+let fullRefreshTimer = null;
+let tickInFlight = false;
+
+function getTickTarget() {
+  if (state.tab === 'KOSPI' || state.tab === 'KOSDAQ' || state.tab === 'NASDAQ') {
+    return { target: state.tab, intervalMs: state.tab === 'NASDAQ' ? 5000 : 1500 };
+  }
+  const sp = state.stockPayload;
+  if (sp && sp.symbol) {
+    if (sp.isKr) {
+      const code = sp.symbol.split('.')[0];
+      return { target: code, intervalMs: 1500 };
+    }
+    return { target: sp.symbol, intervalMs: 5000 };
+  }
+  return null;
+}
+
+async function runSingleTick() {
+  if (!state.autoLive || document.hidden || !state.workerUrl || tickInFlight) return;
+  const info = getTickTarget();
+  if (!info) return;
+  tickInFlight = true;
+  try {
+    const res = await fetch(`${state.workerUrl.replace(/\/+$/, '')}/tick?target=${encodeURIComponent(info.target)}`);
+    if (!res.ok) return;
+    const d = await res.json();
+    if (!Number.isFinite(d.close)) return;
+
+    const priceEl = document.getElementById('hero-price');
+    const retEl = document.getElementById('hero-ret');
+    const openLine = document.getElementById('hero-open-line');
+    const stampEl = document.getElementById('header-stamp');
+    const isStock = state.tab === 'STOCK';
+    const isKrwStock = isStock && state.stockPayload && state.stockPayload.currency === 'KRW';
+    const isUsStock = isStock && state.stockPayload && !state.stockPayload.isKr;
+    const dec = isKrwStock ? 0 : 2;
+    const pfx = isUsStock ? '$' : '';
+    const ufx = isKrwStock ? '원' : '';
+
+    // Update underlying state so next full render stays consistent
+    if (!isStock) {
+      if (!state.liveIndices[state.tab]) state.liveIndices[state.tab] = {};
+      state.liveIndices[state.tab].close = d.close;
+      if (Number.isFinite(d.pct)) state.liveIndices[state.tab].pct = d.pct;
+      if (Number.isFinite(d.open)) state.liveIndices[state.tab].open = d.open;
+    } else if (state.stockPayload && state.stockPayload.rows && state.stockPayload.rows.length) {
+      const last = state.stockPayload.rows[state.stockPayload.rows.length - 1];
+      last[1] = d.close;
+      if (Number.isFinite(d.pct)) last[2] = d.pct;
+      if (Number.isFinite(d.open)) last[3] = d.open;
+    }
+
+    if (priceEl) {
+      const prevP = state.lastTickPrice;
+      priceEl.textContent = pfx + fmtNum(d.close, dec) + ufx;
+      if (Number.isFinite(prevP) && prevP !== d.close) {
+        const cls = d.close > prevP ? 'flash-up' : 'flash-down';
+        priceEl.classList.remove('flash-up', 'flash-down');
+        void priceEl.offsetWidth;
+        priceEl.classList.add(cls);
+        setTimeout(() => priceEl.classList.remove(cls), 420);
+      }
+      state.lastTickPrice = d.close;
+    }
+    if (retEl && Number.isFinite(d.pct)) {
+      const c = getColors();
+      const rc = d.pct >= 0 ? c.up : c.down;
+      retEl.textContent = fmtSigned(d.pct, '%');
+      retEl.style.color = rc;
+      retEl.style.backgroundColor = rc + '1A';
+    }
+    if (openLine && Number.isFinite(d.open) && d.open > 0) {
+      const pr = isStock ? state.stockPhaseResult : state.currentPhaseResult;
+      if (pr && pr.phase === 'intraday') {
+        const diffPct = ((d.close / d.open) - 1) * 100;
+        openLine.textContent = `오늘 시초가 ${pfx}${fmtNum(d.open, dec)}${ufx} (현재 시가 대비 ${fmtSigned(diffPct, '%')})`;
+      }
+    }
+    if (stampEl && d.updatedKst) {
+      stampEl.textContent = d.updatedKst.slice(5, 19) + ' LIVE';
+    }
+  } catch (_) {
+  } finally {
+    tickInFlight = false;
+  }
+}
+
+function scheduleLiveLoops() {
+  if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
+  if (fullRefreshTimer) { clearInterval(fullRefreshTimer); fullRefreshTimer = null; }
+  if (!state.autoLive || document.hidden) return;
+  const info = getTickTarget();
+  const tickMs = info ? info.intervalMs : 2000;
+  tickTimer = setInterval(runSingleTick, tickMs);
+  fullRefreshTimer = setInterval(() => {
+    if (!state.autoLive || document.hidden) return;
+    if (state.tab === 'STOCK') {
+      if (state.stockQuery && !state.stockLoading) fetchStockData(state.stockQuery);
+    } else {
+      fetchLiveMarketData(true);
+    }
+  }, 15000);
+}
+
 function initV8() {
   bindEvents();
   computeActiveIndex();
   renderAll();
   fetchLiveMarketData(true);
+  scheduleLiveLoops();
 }
 
 if (document.readyState === 'loading') {

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="theme-color" content="#FFFFFF" id="meta-theme-color" />
-  <title>지수 관측소 v9.0</title>
+  <title>지수 관측소 v9.1</title>
   <link rel="icon" type="image/png" href="icon-512.png" />
   <link rel="apple-touch-icon" href="icon-512.png" />
   <link rel="manifest" href="manifest.json" />
@@ -20,6 +20,8 @@
       transition: background-color 0.2s ease, color 0.2s ease;
     }
     .tabular { font-variant-numeric: tabular-nums; }
+    .flash-up { color: #E11D48 !important; transition: color 0.15s ease; }
+    .flash-down { color: #2563EB !important; transition: color 0.15s ease; }
     .drawer-content {
       max-height: 0;
       overflow: hidden;
@@ -62,7 +64,8 @@
           </div>
         </div>
         <div class="flex items-center gap-1.5">
-          <button id="btn-live-refresh" class="px-3 py-1.5 rounded-full text-xs font-extrabold transition-colors">↻ 새로고침</button>
+          <button id="btn-auto-live" class="px-2.5 py-1.5 rounded-full text-xs font-extrabold transition-colors">● LIVE</button>
+          <button id="btn-live-refresh" class="px-2.5 py-1.5 rounded-full text-xs font-extrabold transition-colors">↻</button>
           <button id="btn-theme-toggle" class="px-2.5 py-1.5 rounded-full text-xs font-extrabold transition-colors" aria-label="테마 전환">다크</button>
         </div>
       </div>
@@ -181,7 +184,7 @@
   <div id="toast-box" class="px-4 py-2.5 rounded-full text-xs font-extrabold shadow-lg"></div>
 
   <script src="data.js"></script>
-  <script src="model.js?v=900"></script>
-  <script src="app.js?v=900"></script>
+  <script src="model.js?v=910"></script>
+  <script src="app.js?v=910"></script>
 </body>
 </html>
