@@ -1997,6 +1997,18 @@ async function runSingleTick() {
         openLine.textContent = `오늘 시초가 ${pfx}${fmtNum(d.open, dec)}${ufx} (현재 시가 대비 ${fmtSigned(diffPct, '%')})`;
       }
     }
+    const prTick = isStock ? state.stockPhaseResult : state.currentPhaseResult;
+    const scoreEl = document.getElementById('forecast-score');
+    if (prTick && scoreEl) {
+      const candlesTick = getCandlesForView().slice(-15);
+      const openTick = Number.isFinite(d.open) && d.open > 0 ? d.open : NaN;
+      const fcTick = buildForecastCandle(candlesTick, openTick, prTick.phase === 'intraday', d.close);
+      if (fcTick && Number.isFinite(fcTick.close)) {
+        const c = getColors();
+        scoreEl.textContent = pfx + fmtNum(fcTick.close, dec) + ufx;
+        scoreEl.style.color = prTick.dir === 'up' ? c.up : prTick.dir === 'down' ? c.down : c.flat;
+      }
+    }
     if (stampEl && d.updatedKst) {
       stampEl.textContent = d.updatedKst.slice(5, 19) + ' LIVE';
     }
