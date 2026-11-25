@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="theme-color" content="#FFFFFF" id="meta-theme-color" />
-  <title>지수 관측소 v9.2</title>
+  <title>지수 관측소 v9.2.1</title>
   <link rel="icon" type="image/png" href="icon-512.png" />
   <link rel="apple-touch-icon" href="icon-512.png" />
   <link rel="manifest" href="manifest.json" />
@@ -139,6 +139,9 @@
         </div>
       </section>
 
+      <!-- Short-term Entry Check Card (Intraday / Regular Close / NXT 20:00 Overnight) -->
+      <section id="scalp-card" class="rounded-[24px] p-4 transition-colors duration-200"></section>
+
       <!-- Candlestick Chart Card (Default = Candle, Toggle = Line) -->
       <section id="chart-card" class="rounded-[24px] p-4 transition-colors duration-200">
         <div class="flex items-center justify-between gap-2 mb-3">
@@ -158,9 +161,6 @@
 
       <!-- Context Panel: KR Live Investor Breakdown (incl. 연기금·금투·투신) / NASDAQ Overnight Korea Panel -->
       <section id="context-panel" class="rounded-[24px] p-4 transition-colors duration-200"></section>
-
-      <!-- Short-term Entry Check Card (Intraday / Regular Close / NXT 20:00 Overnight) -->
-      <section id="scalp-card" class="rounded-[24px] p-4 transition-colors duration-200"></section>
 
       <!-- Collapsible Detailed Drawer (All Secondary Features Safely Tucked Inside) -->
       <section>
@@ -188,7 +188,7 @@
   <div id="toast-box" class="px-4 py-2.5 rounded-full text-xs font-extrabold shadow-lg"></div>
 
   <script src="data.js"></script>
-  <script src="model.js?v=920"></script>
-  <script src="app.js?v=920"></script>
+  <script src="model.js?v=921"></script>
+  <script src="app.js?v=921"></script>
 </body>
 </html>

@@ -1601,7 +1601,7 @@ function computeLatestPeerAvgPct(peers) {
   return vals.reduce((a, b) => a + b, 0) / vals.length;
 }
 
-async function fetchStockData(query) {
+async function fetchStockData(query, silent = false) {
   const q = String(query || '').trim();
   if (!q) return;
   if (!state.workerUrl) {
@@ -1609,9 +1609,12 @@ async function fetchStockData(query) {
     renderAll();
     return;
   }
-  state.stockLoading = true;
-  state.stockError = '';
-  renderAll();
+  const hasExisting = Boolean(state.stockPayload && state.stockPayload.rows && state.stockPayload.rows.length);
+  if (!silent || !hasExisting) {
+    state.stockLoading = true;
+    state.stockError = '';
+    renderAll();
+  }
   try {
     const baseU = state.workerUrl.replace(/\/+$/, '');
     const [res, liveRes] = await Promise.all([
@@ -1889,7 +1892,7 @@ function scheduleLiveLoops() {
   fullRefreshTimer = setInterval(() => {
     if (!state.autoLive || document.hidden) return;
     if (state.tab === 'STOCK') {
-      if (state.stockQuery && !state.stockLoading) fetchStockData(state.stockQuery);
+      if (state.stockQuery && !state.stockLoading) fetchStockData(state.stockQuery, true);
     } else {
       fetchLiveMarketData(true);
     }
