@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="theme-color" content="#FFFFFF" id="meta-theme-color" />
-  <title>지수 관측소 v9.3.1</title>
+  <title>지수 관측소 v9.3.2</title>
   <link rel="icon" type="image/png" href="icon-512.png" />
   <link rel="apple-touch-icon" href="icon-512.png" />
   <link rel="manifest" href="manifest.json" />
@@ -59,7 +59,7 @@
         <div class="flex items-center gap-2.5">
           <div id="brand-icon" class="w-8 h-8 rounded-xl flex items-center justify-center shrink-0"></div>
           <div>
-            <div class="font-black text-[15px] tracking-tight leading-tight">지수 관측소</div>
+            <div class="font-black text-[15px] tracking-tight leading-tight flex items-center gap-1.5">지수 관측소 <span class="text-[10px] font-bold opacity-55">v9.3.2</span></div>
             <div id="header-stamp" class="text-[11px] font-semibold opacity-60 tabular leading-tight">종가 기준</div>
           </div>
         </div>
@@ -190,8 +190,9 @@
 
   <div id="toast-box" class="px-4 py-2.5 rounded-full text-xs font-extrabold shadow-lg"></div>
 
+  <script>if('serviceWorker' in navigator){navigator.serviceWorker.getRegistrations().then(rs=>rs.forEach(r=>r.unregister())).catch(()=>{});}</script>
   <script src="data.js"></script>
-  <script src="model.js?v=931"></script>
-  <script src="app.js?v=931"></script>
+  <script src="model.js?v=932"></script>
+  <script src="app.js?v=932"></script>
 </body>
 </html>

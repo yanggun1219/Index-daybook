@@ -363,7 +363,7 @@ function getNxtPrePct(data) {
   return last && Number.isFinite(last[2]) ? last[2] : NaN;
 }
 
-function buildForecastCandle(candles, todayOpen, isIntraday) {
+function buildForecastCandle(candles, todayOpen, isIntraday, displayPrice) {
   if (!candles.length) return null;
   const isStock = state.tab === 'STOCK';
   const pr = isStock ? state.stockPhaseResult : state.currentPhaseResult;
@@ -372,7 +372,9 @@ function buildForecastCandle(candles, todayOpen, isIntraday) {
   const liveIdxClose = (!isStock && state.liveIndices[state.tab] && Number.isFinite(state.liveIndices[state.tab].close) && state.liveIndices[state.tab].close > 0)
     ? state.liveIndices[state.tab].close
     : NaN;
-  const effectiveClose = Number.isFinite(liveIdxClose) ? liveIdxClose : lastClose;
+  const effectiveClose = (Number.isFinite(displayPrice) && displayPrice > 0)
+    ? displayPrice
+    : (Number.isFinite(liveIdxClose) ? liveIdxClose : lastClose);
   const isNxtPreStock = isStock && !isIntraday && state.stockPayload && state.stockPayload.isKr && state.stockPayload.sessionTag === 'NXT 프리장';
   let basePrice = (isIntraday && Number.isFinite(todayOpen) && todayOpen > 0) ? todayOpen : effectiveClose;
   if (isNxtPreStock) {
@@ -423,7 +425,7 @@ function buildForecastCandle(candles, todayOpen, isIntraday) {
   };
 }
 
-function renderCandlestickChart(todayOpen, isIntraday) {
+function renderCandlestickChart(todayOpen, isIntraday, curPrice) {
   const svg = document.getElementById('main-chart-svg');
   const candles = getCandlesForView().slice(-15);
   const c = getColors();
@@ -435,7 +437,7 @@ function renderCandlestickChart(todayOpen, isIntraday) {
     return;
   }
 
-  const fCandle = buildForecastCandle(candles, todayOpen, isIntraday);
+  const fCandle = buildForecastCandle(candles, todayOpen, isIntraday, curPrice);
 
   let minV = Infinity;
   let maxV = -Infinity;
@@ -887,7 +889,7 @@ function evaluateScalpCheck(nowMs) {
     c3Title = '예상 밴드 손절 기준';
     const snap = getCurrentAssetSnapshot();
     const candles = getCandlesForView().slice(-15);
-    const fc = buildForecastCandle(candles, NaN, pr.phase === 'intraday');
+    const fc = buildForecastCandle(candles, NaN, pr.phase === 'intraday', snap.price);
     if (fc && Number.isFinite(fc.low) && Number.isFinite(fc.high)) {
       const stopPrice = dir === 'down' ? fc.high : fc.low;
       c3Pass = c1Pass && dir !== 'flat';
@@ -1560,7 +1562,7 @@ function renderAll() {
     }
     const sc = Number.isFinite(pr.dirScore) ? pr.dirScore : (Number.isFinite(pr.p) ? Math.max(-100, Math.min(100, Math.round((pr.p - 0.5) * 200))) : 0);
     const candlesNow = getCandlesForView().slice(-15);
-    const fcNow = buildForecastCandle(candlesNow, todayOpen, phase === 'intraday');
+    const fcNow = buildForecastCandle(candlesNow, todayOpen, phase === 'intraday', curPrice);
     const targetLblEl = document.getElementById('forecast-target-lbl');
     const decP = isStock && state.stockPayload && state.stockPayload.currency === 'KRW' ? 0 : 2;
     const pfx = isStock && state.stockPayload && state.stockPayload.currency !== 'KRW' ? '$' : '';
@@ -1608,7 +1610,7 @@ function renderAll() {
     b.style.backgroundColor = on ? (d ? '#2E3546' : '#FFFFFF') : 'transparent';
     b.style.color = on ? c.text : c.muted;
   });
-  renderCandlestickChart(todayOpen, phase === 'intraday');
+  renderCandlestickChart(todayOpen, phase === 'intraday', curPrice);
   renderContextPanel();
   renderScalpCard();
 
