@@ -353,13 +353,29 @@ function getCandlesForView() {
   });
 }
 
+function getNxtPrePct(data) {
+  if (!data || !data.isKr || data.sessionTag !== 'NXT 프리장') return NaN;
+  const last = data.rows && data.rows.length ? data.rows[data.rows.length - 1] : null;
+  return last && Number.isFinite(last[2]) ? last[2] : NaN;
+}
+
 function buildForecastCandle(candles, todayOpen, isIntraday) {
   if (!candles.length) return null;
   const isStock = state.tab === 'STOCK';
   const pr = isStock ? state.stockPhaseResult : state.currentPhaseResult;
   if (!pr) return null;
   const lastClose = candles[candles.length - 1][4];
-  const basePrice = (isIntraday && Number.isFinite(todayOpen) && todayOpen > 0) ? todayOpen : lastClose;
+  const isNxtPreStock = isStock && !isIntraday && state.stockPayload && state.stockPayload.isKr && state.stockPayload.sessionTag === 'NXT 프리장';
+  let basePrice = (isIntraday && Number.isFinite(todayOpen) && todayOpen > 0) ? todayOpen : lastClose;
+  if (isNxtPreStock) {
+    // NXT 프리장(08:00~08:59)에는 마지막 봉이 이미 NXT 실시간가이므로, 09:00 KRX 시초가 갭 이중 반영 방지를 위해 전일 종가 기준 사용
+    if (candles.length >= 2 && Number.isFinite(candles[candles.length - 2][4]) && candles[candles.length - 2][4] > 0) {
+      basePrice = candles[candles.length - 2][4];
+    } else {
+      const nxtPct = getNxtPrePct(state.stockPayload);
+      if (Number.isFinite(nxtPct) && nxtPct > -99) basePrice = lastClose / (1 + nxtPct / 100);
+    }
+  }
   if (!Number.isFinite(basePrice) || basePrice <= 0) return null;
 
   let lowPct = -1.8;
@@ -381,7 +397,7 @@ function buildForecastCandle(candles, todayOpen, isIntraday) {
   // 장전 야간 갭/NXT 이동폭(shiftPct)을 중심에 반영해 실제 예상 범위가 현실적으로 따라오도록 보정
   const adjLowPct = Math.min(lowPct + shiftPct * 0.75, shiftPct - span * 0.35);
   const adjHighPct = Math.max(highPct + shiftPct * 0.75, shiftPct + span * 0.35);
-  const expPct = shiftPct + (sc / 100) * span * 0.35;
+  const expPct = shiftPct + (sc / 100) * span * (isNxtPreStock ? 0.14 : 0.35);
   const predLow = basePrice * (1 + Math.min(adjLowPct, expPct) / 100);
   const predHigh = basePrice * (1 + Math.max(adjHighPct, expPct) / 100);
   const predClose = basePrice * (1 + expPct / 100);
@@ -617,6 +633,354 @@ function renderContextPanel() {
     <div class="grid grid-cols-3 gap-2 mt-2">${subRow.map(mkTile).join('')}</div>`;
 }
 
+
+// =========================================================================
+// 단타 진입 체크 (장중 / 정규장 종베 / 개별종목 NXT 20시 종베) + 매매 기록장
+// =========================================================================
+const JOURNAL_KEY = 'daybook_v9_journal';
+
+function loadJournal() {
+  try {
+    const raw = safeRead(JOURNAL_KEY, '[]');
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function saveJournal(arr) {
+  safeWrite(JOURNAL_KEY, JSON.stringify((arr || []).slice(0, 80)));
+}
+
+function getCurrentAssetSnapshot() {
+  const isStock = state.tab === 'STOCK';
+  if (isStock && state.stockPayload && state.stockPayload.rows && state.stockPayload.rows.length) {
+    const sp = state.stockPayload;
+    const last = sp.rows[sp.rows.length - 1];
+    return {
+      key: sp.symbol,
+      name: sp.name || sp.symbol,
+      price: last[1],
+      isKr: Boolean(sp.isKr),
+      isStock: true,
+      dec: sp.currency === 'KRW' ? 0 : 2,
+      pfx: sp.currency === 'KRW' ? '' : '$',
+      ufx: sp.currency === 'KRW' ? '원' : ''
+    };
+  }
+  const rows = state.marketsData[state.tab] || [];
+  const last = rows.length ? rows[rows.length - 1] : null;
+  const lv = state.liveIndices[state.tab];
+  const price = (lv && Number.isFinite(lv.close)) ? lv.close : (last ? last[1] : NaN);
+  return {
+    key: state.tab,
+    name: MARKET_LABELS[state.tab] || state.tab,
+    price,
+    isKr: state.tab !== 'NASDAQ',
+    isStock: false,
+    dec: 2,
+    pfx: '',
+    ufx: ''
+  };
+}
+
+function evaluateScalpCheck(nowMs) {
+  const ms = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const kst = new Date(ms + 9 * 3600 * 1000);
+  const dow = kst.getUTCDay();
+  const mins = kst.getUTCHours() * 60 + kst.getUTCMinutes();
+  const isWeekday = dow >= 1 && dow <= 5;
+
+  const isStock = state.tab === 'STOCK';
+  const sp = isStock ? state.stockPayload : null;
+  const isKr = isStock ? (sp ? Boolean(sp.isKr) : true) : (state.tab !== 'NASDAQ');
+  const pr = isStock ? state.stockPhaseResult : state.currentPhaseResult;
+  if (!pr) return null;
+
+  const sc = Number.isFinite(pr.dirScore) ? pr.dirScore : Math.round((pr.p - 0.5) * 200);
+  const absSc = Math.abs(sc);
+  const dir = sc >= 10 ? 'up' : sc <= -10 ? 'down' : 'flat';
+
+  // 창구 판별 (한국 개별종목은 15:30~20:00 NXT 애프터장 종가베팅 포함)
+  let windowCode = 'overnight_wait';
+  let windowLabel = '다음 거래일 시초가 준비';
+  let strategyTag = '종가베팅';
+  let minScore = 30;
+
+  if (isKr && isWeekday) {
+    if (mins >= 480 && mins < 540) {
+      windowCode = 'nxt_pre';
+      windowLabel = isStock ? 'NXT 프리장 점검 (08:00~09:00)' : '개장 전 시초가 점검';
+      strategyTag = '프리장 대응';
+      minScore = 30;
+    } else if (mins >= 540 && mins < 555) {
+      windowCode = 'open_noise';
+      windowLabel = '개장 초반 변동 구간 (09:15 이후 권장)';
+      strategyTag = '장중 단타';
+      minScore = 40;
+    } else if (mins >= 555 && mins < 915) {
+      windowCode = 'intraday';
+      windowLabel = '장중 단타 창구 (오늘 종가 예측)';
+      strategyTag = '장중 단타';
+      minScore = 35;
+    } else if (mins >= 915 && mins < 930) {
+      windowCode = 'krx_close_bet';
+      windowLabel = '정규장 종가베팅 창구 (15:15~15:30)';
+      strategyTag = '정규장 종베';
+      minScore = 30;
+    } else if (mins >= 930 && mins < 1200 && isStock) {
+      windowCode = 'nxt_after_bet';
+      windowLabel = mins >= 1170
+        ? 'NXT 20시 종가베팅 마감 직전 (19:30~20:00)'
+        : 'NXT 애프터장 종가베팅 가능 (~20:00)';
+      strategyTag = 'NXT 20시 종베';
+      minScore = 30;
+    } else if (mins >= 930 && mins < 1200 && !isStock) {
+      windowCode = 'overnight_wait';
+      windowLabel = '장 마감 · 야간 시초가 관찰 (개별종목은 NXT ~20:00)';
+      strategyTag = '종가베팅';
+      minScore = 30;
+    }
+  } else if (!isKr) {
+    if (pr.phase === 'intraday') {
+      windowCode = 'intraday';
+      windowLabel = '미국 장중 단타 창구 (오늘 종가 예측)';
+      strategyTag = '미국 장중';
+      minScore = 35;
+    } else {
+      windowCode = 'overnight_wait';
+      windowLabel = '미국 프리/애프터장 · 시초가 준비';
+      strategyTag = '미국 장전';
+      minScore = 30;
+    }
+  }
+
+  // 1) 점수 강도 체크
+  const c1Pass = absSc >= minScore;
+  const c1Val = `${sc > 0 ? '+' : ''}${sc}점 (기준 ±${minScore})`;
+
+  // 2) 30분 흐름 / 선행지표 일치 체크
+  const sKey = (isStock && sp ? sp.symbol : state.tab) + ':' + pr.phase;
+  const hist = state.scoreHistory[sKey] || [];
+  let c2Pass = false;
+  let c2Title = '30분 흐름·선행지표';
+  let c2Val = '데이터 누적 중';
+
+  if (pr.phase === 'intraday') {
+    c2Title = '30분 점수 흐름';
+    if (hist.length >= 2) {
+      const diff = hist[hist.length - 1] - hist[0];
+      c2Pass = (dir === 'up' && diff >= 0) || (dir === 'down' && diff <= 0);
+      c2Val = diff > 3 ? '상승 힘 강화' : diff < -3 ? '하락 힘 강화' : '방향 유지';
+    } else {
+      c2Pass = absSc >= minScore;
+      c2Val = '초기 구간';
+    }
+  } else {
+    c2Title = (windowCode === 'nxt_after_bet' && mins >= 1080) ? '미 선물·프리장 일치' : '야간 선행지표 일치';
+    const fut = state.marketsData.FUTURES || {};
+    const leadVals = [];
+    if (Number.isFinite(fut.NQ_pct)) leadVals.push(fut.NQ_pct);
+    if (isStock && sp && sp.sessionTag === 'NXT 프리장') {
+      const np = getNxtPrePct(sp);
+      if (Number.isFinite(np)) leadVals.push(np);
+    }
+    if (isStock && sp && sp.perp && Number.isFinite(sp.perp.pct)) leadVals.push(sp.perp.pct);
+    if (leadVals.length) {
+      const avgLead = leadVals.reduce((x, y) => x + y, 0) / leadVals.length;
+      c2Pass = (dir === 'up' && avgLead > 0.15) || (dir === 'down' && avgLead < -0.15);
+      c2Val = `선행 평균 ${fmtSigned(avgLead, '%')}`;
+    } else {
+      c2Val = '선물 대기';
+    }
+  }
+
+  // 3) 수급 일치 (장중) 또는 예상 밴드 참고 손절선 (장전/종가베팅)
+  let c3Pass = false;
+  let c3Title = '외국인·기관 수급';
+  let c3Val = '집계 대기';
+
+  if (pr.phase === 'intraday' && isKr) {
+    if (isStock && sp && sp.investor) {
+      const net = (Number(sp.investor.frgnQty) || 0) + (Number(sp.investor.orgnQty) || 0);
+      c3Pass = (dir === 'up' && net > 0) || (dir === 'down' && net < 0);
+      c3Val = net > 0 ? '외인·기관 순매수' : net < 0 ? '외인·기관 순매도' : '보합';
+    } else if (!isStock && state.liveInvestors[state.tab]) {
+      const inv = state.liveInvestors[state.tab];
+      const net = (Number(inv.frgn) || 0) + (Number(inv.orgn) || 0);
+      c3Pass = (dir === 'up' && net > 0) || (dir === 'down' && net < 0);
+      c3Val = `합산 ${fmtEok(net)}`;
+    }
+  } else {
+    c3Title = '예상 밴드 손절 기준';
+    const snap = getCurrentAssetSnapshot();
+    const candles = getCandlesForView().slice(-15);
+    const fc = buildForecastCandle(candles, NaN, pr.phase === 'intraday');
+    if (fc && Number.isFinite(fc.low) && Number.isFinite(fc.high)) {
+      const stopPrice = dir === 'down' ? fc.high : fc.low;
+      c3Pass = c1Pass && dir !== 'flat';
+      c3Val = `${dir === 'down' ? '상단' : '하단'} ${snap.pfx}${fmtNum(stopPrice, snap.dec)}${snap.ufx}`;
+    } else {
+      c3Val = '밴드 계산 중';
+    }
+  }
+
+  const passCount = (c1Pass ? 1 : 0) + (c2Pass ? 1 : 0) + (c3Pass ? 1 : 0);
+  let verdict = '관망 (조건 미달)';
+  let verdictTone = 'flat';
+  if (windowCode === 'open_noise' && passCount < 3) {
+    verdict = '09:15 이후 진입 권장';
+    verdictTone = 'flat';
+  } else if (c1Pass && passCount >= 2 && dir === 'up') {
+    verdict = windowCode === 'nxt_pre' ? '상승 유지 · 홀딩 우세' : '매수 진입 우세';
+    verdictTone = 'up';
+  } else if (c1Pass && passCount >= 2 && dir === 'down') {
+    verdict = windowCode === 'nxt_pre' ? '하락 반전 · 프리장 정리 검토' : '매도·인버스 우세';
+    verdictTone = 'down';
+  }
+
+  return {
+    windowCode,
+    windowLabel,
+    strategyTag,
+    verdict,
+    verdictTone,
+    passCount,
+    checks: [
+      { title: '방향 점수 강도', val: c1Val, pass: c1Pass },
+      { title: c2Title, val: c2Val, pass: c2Pass },
+      { title: c3Title, val: c3Val, pass: c3Pass }
+    ],
+    score: sc
+  };
+}
+
+function addJournalEntry(side) {
+  const snap = getCurrentAssetSnapshot();
+  if (!Number.isFinite(snap.price) || snap.price <= 0) {
+    showToast('현재가를 불러온 뒤 기록해 주세요');
+    return;
+  }
+  const chk = evaluateScalpCheck(Date.now());
+  const list = loadJournal();
+  const now = new Date(Date.now() + 9 * 3600 * 1000);
+  const stamp = `${String(now.getUTCMonth() + 1).padStart(2, '0')}/${String(now.getUTCDate()).padStart(2, '0')} ${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}`;
+  list.unshift({
+    id: String(Date.now()),
+    key: snap.key,
+    name: snap.name,
+    side, // 'buy' | 'sell'
+    entryPrice: snap.price,
+    exitPrice: null,
+    retPct: null,
+    score: chk ? chk.score : 0,
+    strategy: chk ? chk.strategyTag : '단타',
+    dec: snap.dec,
+    pfx: snap.pfx,
+    ufx: snap.ufx,
+    entryTime: stamp,
+    exitTime: ''
+  });
+  saveJournal(list);
+  showToast(`${snap.name} ${side === 'buy' ? '매수' : '매도'} 기록 저장`);
+  renderScalpCard();
+  if (state.drawerOpen && state.drawerTab === 'journal') renderDrawer();
+}
+
+function closeJournalEntry(id, customPrice) {
+  const list = loadJournal();
+  const it = list.find(x => x.id === id);
+  if (!it) return;
+  let exitP = Number(customPrice);
+  if (!Number.isFinite(exitP) || exitP <= 0) {
+    const snap = getCurrentAssetSnapshot();
+    if (snap.key === it.key && Number.isFinite(snap.price) && snap.price > 0) {
+      exitP = snap.price;
+    } else {
+      const typed = typeof prompt === 'function' ? prompt(`${it.name} 청산 가격을 입력하세요`, String(it.entryPrice)) : null;
+      exitP = Number(String(typed || '').replace(/,/g, ''));
+    }
+  }
+  if (!Number.isFinite(exitP) || exitP <= 0) return;
+  const rawPct = ((exitP / it.entryPrice) - 1) * 100;
+  it.exitPrice = exitP;
+  it.retPct = Number((it.side === 'buy' ? rawPct : -rawPct).toFixed(2));
+  const now = new Date(Date.now() + 9 * 3600 * 1000);
+  it.exitTime = `${String(now.getUTCMonth() + 1).padStart(2, '0')}/${String(now.getUTCDate()).padStart(2, '0')} ${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}`;
+  saveJournal(list);
+  showToast(`${it.name} 청산 완료 (${fmtSigned(it.retPct, '%')})`);
+  renderScalpCard();
+  if (state.drawerOpen && state.drawerTab === 'journal') renderDrawer();
+}
+
+function deleteJournalEntry(id) {
+  const list = loadJournal().filter(x => x.id !== id);
+  saveJournal(list);
+  renderScalpCard();
+  if (state.drawerOpen && state.drawerTab === 'journal') renderDrawer();
+}
+
+function renderScalpCard() {
+  const box = document.getElementById('scalp-card');
+  if (!box) return;
+  const c = getColors();
+  box.style.backgroundColor = c.card;
+  box.style.border = `1px solid ${c.border}`;
+  const chk = evaluateScalpCheck(Date.now());
+  if (!chk) {
+    box.style.display = 'none';
+    return;
+  }
+  box.style.display = 'block';
+  const tileStyle = `background-color:${c.tile}; border:1px solid ${c.border};`;
+  const vCol = chk.verdictTone === 'up' ? c.up : chk.verdictTone === 'down' ? c.down : c.muted;
+
+  const list = loadJournal();
+  const closed = list.filter(x => Number.isFinite(x.retPct));
+  const wins = closed.filter(x => x.retPct > 0).length;
+  const winStr = closed.length ? `승률 ${Math.round((wins / closed.length) * 100)}%` : '기록 보기';
+
+  box.innerHTML = `
+    <div class="flex items-center justify-between gap-2 mb-2.5">
+      <div class="min-w-0">
+        <div class="text-xs font-extrabold">단타 진입 체크</div>
+        <div class="text-[10px] font-bold opacity-60 truncate mt-0.5">${chk.windowLabel}</div>
+      </div>
+      <span class="shrink-0 px-2.5 py-1 rounded-xl text-[11px] font-black" style="background-color:${vCol}1A; color:${vCol};">${chk.verdict} (${chk.passCount}/3)</span>
+    </div>
+    <div class="grid grid-cols-3 gap-1.5">
+      ${chk.checks.map(it => {
+        const dotCol = it.pass ? (chk.verdictTone === 'down' ? c.down : c.up) : c.muted;
+        return `<div class="p-2 rounded-2xl text-center" style="${tileStyle}">
+          <div class="text-[10px] font-bold opacity-65 truncate">${it.title}</div>
+          <div class="text-[11px] font-black tabular mt-0.5 truncate" style="color:${dotCol}">${it.pass ? '● ' : '○ '}${it.val}</div>
+        </div>`;
+      }).join('')}
+    </div>
+    <div class="mt-2.5 flex items-center justify-between gap-1.5">
+      <div class="flex items-center gap-1.5">
+        <button id="btn-scalp-buy" class="px-2.5 py-1.5 rounded-xl text-[11px] font-extrabold transition-colors" style="background-color:${c.up}1A; color:${c.up};">매수 기록</button>
+        <button id="btn-scalp-sell" class="px-2.5 py-1.5 rounded-xl text-[11px] font-extrabold transition-colors" style="background-color:${c.down}1A; color:${c.down};">매도 기록</button>
+      </div>
+      <button id="btn-open-journal" class="px-2.5 py-1.5 rounded-xl text-[11px] font-bold transition-colors" style="${tileStyle} color:${c.text};">기록 ${list.length}건 · ${winStr} ▸</button>
+    </div>
+  `;
+
+  const bBuy = document.getElementById('btn-scalp-buy');
+  const bSell = document.getElementById('btn-scalp-sell');
+  const bOpen = document.getElementById('btn-open-journal');
+  if (bBuy) bBuy.onclick = () => addJournalEntry('buy');
+  if (bSell) bSell.onclick = () => addJournalEntry('sell');
+  if (bOpen) bOpen.onclick = () => {
+    state.drawerOpen = true;
+    state.drawerTab = 'journal';
+    renderAll();
+    const dp = document.getElementById('drawer-panel');
+    if (dp) dp.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  };
+}
+
 function renderDrawer() {
   const area = document.getElementById('drawer-content-area');
   const c = getColors();
@@ -718,6 +1082,79 @@ function renderDrawer() {
       html += `</div>`;
     }
     area.innerHTML = html;
+  } else if (state.drawerTab === 'journal') {
+    const list = loadJournal();
+    const closed = list.filter(x => Number.isFinite(x.retPct));
+    const wins = closed.filter(x => x.retPct > 0).length;
+    const avgRet = closed.length ? (closed.reduce((s, x) => s + x.retPct, 0) / closed.length) : NaN;
+    const avgCol = Number.isFinite(avgRet) ? (avgRet >= 0 ? c.up : c.down) : c.muted;
+    const snap = getCurrentAssetSnapshot();
+
+    let html = `<div class="grid grid-cols-3 gap-2 text-center">
+      <div class="p-2.5 rounded-2xl" style="${tileStyle}">
+        <div class="text-[10px] font-bold opacity-65">승률</div>
+        <div class="text-sm font-black tabular mt-0.5">${closed.length ? Math.round((wins / closed.length) * 100) + '%' : '-'}</div>
+      </div>
+      <div class="p-2.5 rounded-2xl" style="${tileStyle}">
+        <div class="text-[10px] font-bold opacity-65">평균 수익률</div>
+        <div class="text-sm font-black tabular mt-0.5" style="color:${avgCol}">${Number.isFinite(avgRet) ? fmtSigned(avgRet, '%') : '-'}</div>
+      </div>
+      <div class="p-2.5 rounded-2xl" style="${tileStyle}">
+        <div class="text-[10px] font-bold opacity-65">완료 / 전체</div>
+        <div class="text-sm font-black tabular mt-0.5">${closed.length} / ${list.length}</div>
+      </div>
+    </div>`;
+
+    if (!list.length) {
+      html += `<div class="p-4 rounded-2xl text-center opacity-65" style="${tileStyle}">위 <b>단타 진입 체크</b>에서 매수·매도 기록을 누르면 이곳에 승률과 수익률이 쌓입니다.</div>`;
+    } else {
+      html += `<div class="space-y-2">`;
+      for (const it of list.slice(0, 25)) {
+        const isClosed = Number.isFinite(it.retPct);
+        const sideCol = it.side === 'buy' ? c.up : c.down;
+        const retCol = isClosed ? (it.retPct >= 0 ? c.up : c.down) : c.muted;
+        const sameAsset = snap.key === it.key && Number.isFinite(snap.price) && snap.price > 0;
+        const livePct = (!isClosed && sameAsset)
+          ? Number((((snap.price / it.entryPrice) - 1) * 100 * (it.side === 'buy' ? 1 : -1)).toFixed(2))
+          : NaN;
+        html += `<div class="p-3 rounded-2xl" style="${tileStyle}">
+          <div class="flex items-center justify-between gap-2">
+            <div class="min-w-0 flex items-center gap-1.5">
+              <span class="px-1.5 py-0.5 rounded-md text-[10px] font-black" style="background-color:${sideCol}1A; color:${sideCol};">${it.side === 'buy' ? '매수' : '매도'}</span>
+              <span class="font-extrabold truncate">${it.name}</span>
+              <span class="text-[10px] font-bold opacity-55">${it.strategy || '단타'} · ${it.score > 0 ? '+' : ''}${it.score}점</span>
+            </div>
+            <button data-jdel="${it.id}" class="text-[10px] font-bold opacity-50 px-1.5">삭제</button>
+          </div>
+          <div class="mt-1.5 flex items-center justify-between gap-2 text-[11px] tabular">
+            <span class="opacity-75">${it.entryTime} · ${it.pfx}${fmtNum(it.entryPrice, it.dec)}${it.ufx}${isClosed ? ` → ${it.pfx}${fmtNum(it.exitPrice, it.dec)}${it.ufx}` : ''}</span>
+            ${isClosed
+              ? `<span class="font-black" style="color:${retCol}">${fmtSigned(it.retPct, '%')}</span>`
+              : `<div class="flex items-center gap-1.5">
+                  ${Number.isFinite(livePct) ? `<span class="font-extrabold" style="color:${livePct >= 0 ? c.up : c.down}">평가 ${fmtSigned(livePct, '%')}</span>` : ''}
+                  <button data-jclose="${it.id}" class="px-2 py-0.5 rounded-lg text-[10px] font-extrabold" style="background-color:${c.text}; color:${c.card};">${sameAsset ? '현재가 청산' : '청산 입력'}</button>
+                </div>`
+            }
+          </div>
+        </div>`;
+      }
+      html += `</div>`;
+      html += `<button id="btn-journal-clear" class="w-full py-2 rounded-xl text-[11px] font-bold opacity-65" style="${tileStyle}">기록 전체 초기화</button>`;
+    }
+    area.innerHTML = html;
+    area.querySelectorAll('[data-jclose]').forEach(btn => {
+      btn.addEventListener('click', () => closeJournalEntry(btn.dataset.jclose));
+    });
+    area.querySelectorAll('[data-jdel]').forEach(btn => {
+      btn.addEventListener('click', () => deleteJournalEntry(btn.dataset.jdel));
+    });
+    const clr = document.getElementById('btn-journal-clear');
+    if (clr) clr.addEventListener('click', () => {
+      saveJournal([]);
+      showToast('매매 기록을 초기화했어요');
+      renderScalpCard();
+      renderDrawer();
+    });
   } else if (state.drawerTab === 'sim') {
     if (state.tab === 'STOCK' || !state.currentForecast || !state.currentForecast.modelRef) {
       area.innerHTML = `<div class="p-4 rounded-2xl text-center opacity-70" style="${tileStyle}">코스피 · 코스닥 · 나스닥 탭에서 가정 시뮬레이터를 사용할 수 있습니다.</div>`;
@@ -983,9 +1420,12 @@ function renderAll() {
     const diffPct = ((curPrice / todayOpen) - 1) * 100;
     const dec = isStock && state.stockPayload && state.stockPayload.currency === 'KRW' ? 0 : 2;
     const prefix = isStock && state.stockPayload && state.stockPayload.currency !== 'KRW' ? '$' : '';
+    const isNxtPreNow = isStock && state.stockPayload && state.stockPayload.isKr && state.stockPayload.sessionTag === 'NXT 프리장';
     openLine.textContent = phase === 'intraday'
       ? `오늘 시초가 ${prefix}${fmtNum(todayOpen, dec)}${unit} (현재 시가 대비 ${fmtSigned(diffPct, '%')})`
-      : `직전 시초가 ${prefix}${fmtNum(todayOpen, dec)}${unit} · 야간 선행지표 반영`;
+      : (isNxtPreNow
+          ? `NXT 프리장 실시간 · 야간 선행지표 반영 (09:00 KRX 시초가 예측)`
+          : `직전 시초가 ${prefix}${fmtNum(todayOpen, dec)}${unit} · 야간 선행지표 반영`);
   } else {
     openLine.textContent = phase === 'intraday'
       ? '장중 실시간 시세 기준'
@@ -1080,6 +1520,7 @@ function renderAll() {
   });
   renderCandlestickChart(todayOpen, phase === 'intraday');
   renderContextPanel();
+  renderScalpCard();
 
   // Drawer
   const dBtn = document.getElementById('btn-drawer-toggle');
@@ -1216,6 +1657,7 @@ async function fetchStockData(query) {
       esPct: fut.ES_pct,
       k200Pct: fut.K200_pct,
       peerAvgPct: computeLatestPeerAvgPct(data.peers),
+      nxtPrePct: getNxtPrePct(data),
       perpPct: data.perp ? data.perp.pct : NaN,
       investor: data.investor || null
     });
@@ -1283,6 +1725,7 @@ function bindEvents() {
         esPct: fut.ES_pct,
         k200Pct: fut.K200_pct,
         peerAvgPct: computeLatestPeerAvgPct(data.peers),
+        nxtPrePct: getNxtPrePct(data),
         perpPct: data.perp ? data.perp.pct : NaN,
         investor: data.investor || null
       });

@@ -1152,6 +1152,9 @@ function computePhaseForecast(baseP, opts) {
       if (usCashFresh && Number.isFinite(o.peerAvgPct)) {
         addSig(o.peerAvgPct, 0.65, '업종 핵심 피어(SOX·NVDA 등)');
       }
+      if (Number.isFinite(o.nxtPrePct)) {
+        addSig(o.nxtPrePct, 1.50, 'NXT 프리장 실시간');
+      }
       if (Number.isFinite(o.perpPct)) {
         addSig(o.perpPct, 0.55, '24H 무기한 선물');
       }
@@ -1186,10 +1189,18 @@ function computePhaseForecast(baseP, opts) {
           us_ind:    { maxW: 0.66, beta: 0.75 },
           general:   { maxW: 0.58, beta: 0.62 }
         }[sec] || { maxW: 0.58, beta: 0.62 };
-        const pOvernight = sigmoid(overnightSignal * 0.90 * secCfg.beta);
-        const wOvernight = Math.min(secCfg.maxW, 0.24 + 0.22 * Math.abs(overnightSignal));
-        p = wOvernight * pOvernight + (1 - wOvernight) * p;
-        expectedShiftPct = Math.max(-9, Math.min(9, overnightSignal * secCfg.beta * 0.75));
+        const hasNxtPre = !isUs && Number.isFinite(o.nxtPrePct);
+        if (hasNxtPre) {
+          const pOvernight = sigmoid(overnightSignal * 0.95);
+          const wOvernight = Math.min(0.92, 0.55 + 0.25 * Math.abs(overnightSignal));
+          p = wOvernight * pOvernight + (1 - wOvernight) * p;
+          expectedShiftPct = Math.max(-15, Math.min(15, o.nxtPrePct * 0.72 + overnightSignal * secCfg.beta * 0.25));
+        } else {
+          const pOvernight = sigmoid(overnightSignal * 0.90 * secCfg.beta);
+          const wOvernight = Math.min(secCfg.maxW, 0.24 + 0.22 * Math.abs(overnightSignal));
+          p = wOvernight * pOvernight + (1 - wOvernight) * p;
+          expectedShiftPct = Math.max(-9, Math.min(9, overnightSignal * secCfg.beta * 0.75));
+        }
       } else {
         const pOvernight = sigmoid(overnightSignal * 0.95);
         // 지수: 조용한 밤(|sig|<0.3%)엔 기존 모델 60~65% 유지, 급등락 밤엔 야간 갭 신호 최대 88% 주도
