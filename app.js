@@ -369,8 +369,12 @@ function buildForecastCandle(candles, todayOpen, isIntraday) {
   const pr = isStock ? state.stockPhaseResult : state.currentPhaseResult;
   if (!pr) return null;
   const lastClose = candles[candles.length - 1][4];
+  const liveIdxClose = (!isStock && state.liveIndices[state.tab] && Number.isFinite(state.liveIndices[state.tab].close) && state.liveIndices[state.tab].close > 0)
+    ? state.liveIndices[state.tab].close
+    : NaN;
+  const effectiveClose = Number.isFinite(liveIdxClose) ? liveIdxClose : lastClose;
   const isNxtPreStock = isStock && !isIntraday && state.stockPayload && state.stockPayload.isKr && state.stockPayload.sessionTag === 'NXT 프리장';
-  let basePrice = (isIntraday && Number.isFinite(todayOpen) && todayOpen > 0) ? todayOpen : lastClose;
+  let basePrice = (isIntraday && Number.isFinite(todayOpen) && todayOpen > 0) ? todayOpen : effectiveClose;
   if (isNxtPreStock) {
     // NXT 프리장(08:00~08:59)에는 마지막 봉이 이미 NXT 실시간가이므로, 09:00 KRX 시초가 갭 이중 반영 방지를 위해 전일 종가 기준 사용
     if (candles.length >= 2 && Number.isFinite(candles[candles.length - 2][4]) && candles[candles.length - 2][4] > 0) {
@@ -401,7 +405,10 @@ function buildForecastCandle(candles, todayOpen, isIntraday) {
   // 장전 야간 갭/NXT 이동폭(shiftPct)을 중심에 반영해 실제 예상 범위가 현실적으로 따라오도록 보정
   const adjLowPct = Math.min(lowPct + shiftPct * 0.75, shiftPct - span * 0.35);
   const adjHighPct = Math.max(highPct + shiftPct * 0.75, shiftPct + span * 0.35);
-  const expPct = shiftPct + (sc / 100) * span * (isNxtPreStock ? 0.14 : 0.35);
+  let expPct = shiftPct + (sc / 100) * span * (isNxtPreStock ? 0.14 : 0.35);
+  // 방향(상승/하락)과 예상 가격 부호 일치 보장 (하락 예정인데 기준가보다 높게 나오는 모순 방지)
+  if (pr.dir === 'down' && expPct >= -0.05) expPct = -Math.max(0.15, Math.abs(sc) / 100 * span * 0.25);
+  if (pr.dir === 'up' && expPct <= 0.05) expPct = Math.max(0.15, Math.abs(sc) / 100 * span * 0.25);
   const predLow = basePrice * (1 + Math.min(adjLowPct, expPct) / 100);
   const predHigh = basePrice * (1 + Math.max(adjHighPct, expPct) / 100);
   const predClose = basePrice * (1 + expPct / 100);
