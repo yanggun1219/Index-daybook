@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="theme-color" content="#FFFFFF" id="meta-theme-color" />
-  <title>지수 관측소 v9.2.1</title>
+  <title>지수 관측소 v9.3</title>
   <link rel="icon" type="image/png" href="icon-512.png" />
   <link rel="apple-touch-icon" href="icon-512.png" />
   <link rel="manifest" href="manifest.json" />
@@ -100,8 +100,11 @@
 
         <!-- Market/Stock Name + Live Status -->
         <div class="flex items-center justify-between gap-2 mb-1">
-          <div id="hero-name" class="text-sm font-extrabold opacity-75">코스피</div>
-          <div id="hero-extra-tag" class="text-[11px] font-bold opacity-65"></div>
+          <div class="flex items-center gap-1.5 min-w-0">
+            <div id="hero-name" class="text-sm font-extrabold opacity-75 truncate">코스피</div>
+            <span id="hero-regime-badge" class="hidden px-2 py-0.5 rounded-lg text-[10px] font-black leading-none shrink-0"></span>
+          </div>
+          <div id="hero-extra-tag" class="text-[11px] font-bold opacity-65 shrink-0"></div>
         </div>
 
         <!-- BIG Current Price + Daily % -->
@@ -188,7 +191,7 @@
   <div id="toast-box" class="px-4 py-2.5 rounded-full text-xs font-extrabold shadow-lg"></div>
 
   <script src="data.js"></script>
-  <script src="model.js?v=921"></script>
-  <script src="app.js?v=921"></script>
+  <script src="model.js?v=930"></script>
+  <script src="app.js?v=930"></script>
 </body>
 </html>

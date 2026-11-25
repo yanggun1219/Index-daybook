@@ -44,11 +44,14 @@ const state = {
   // Stock observatory state
   stockQuery: safeRead('daybook_v8_stock', 'SK하이닉스'),
   stockLoading: false,
+  stockReqSeq: 0,
+  stockAbortCtrl: null,
   stockError: '',
   stockPayload: null,
   stockAnalysis: null,
   stockPhaseResult: null,
   scoreDeltas: {},
+  lastTrendHist: {},
   autoLive: safeRead('daybook_v9_autolive', '1') === '1',
   lastTickPrice: null
 };
@@ -154,6 +157,7 @@ function renderScoreTrend(scoreKey, currentScore, c) {
     if (!hist.length && Number.isFinite(currentScore)) hist.push(currentScore);
   }
   hist = hist.slice(-10);
+  if (hist.length) state.lastTrendHist[scoreKey] = hist.slice();
   if (!hist.length) {
     lbl.textContent = '기록 대기';
     lbl.style.color = c.muted;
@@ -685,6 +689,66 @@ function getCurrentAssetSnapshot() {
   };
 }
 
+
+function classifyMarketRegime(rows) {
+  if (!Array.isArray(rows) || rows.length < 15) return null;
+  const closes = rows.map(r => Number(r[1])).filter(v => Number.isFinite(v) && v > 0);
+  if (closes.length < 15) return null;
+  const n = closes.length;
+  const cur = closes[n - 1];
+  const avg = (arr) => arr.reduce((s, x) => s + x, 0) / arr.length;
+  const ma20 = avg(closes.slice(-Math.min(20, n)));
+  const ma60 = avg(closes.slice(-Math.min(60, n)));
+  const ref20 = closes[Math.max(0, n - 21)];
+  const ret20 = ref20 > 0 ? ((cur / ref20) - 1) * 100 : 0;
+  const hi60 = Math.max(...closes.slice(-Math.min(60, n)));
+  const dd60 = hi60 > 0 ? ((cur / hi60) - 1) * 100 : 0;
+  const maGap = ma60 > 0 ? ((ma20 / ma60) - 1) * 100 : 0;
+  const dist60 = ma60 > 0 ? ((cur / ma60) - 1) * 100 : 0;
+
+  let label = '횡보장';
+  let tone = 'flat';
+  let guide = '박스권 짧은 단타 위주';
+
+  if (cur > ma20 && ma20 > ma60 && ret20 >= 3) {
+    label = '강세장';
+    tone = 'up';
+    guide = '비중 확대 · 추세 보유 유리';
+  } else if ((cur < ma20 && ma20 < ma60 && ret20 <= -5) || (cur < ma60 && dd60 <= -10)) {
+    label = '하락장';
+    tone = 'down';
+    guide = '현금 방어 · 짧은 단타/인버스 · 종베 주의';
+  } else if (Math.abs(maGap) <= 2.5 && Math.abs(ret20) < 3.5 && Math.abs(dist60) <= 3.0) {
+    label = '횡보장';
+    tone = 'flat';
+    guide = '박스권 짧은 단타 위주';
+  } else if (cur >= ma60 && (ma20 >= ma60 || ret20 > 0)) {
+    label = '완만 상승';
+    tone = 'up_soft';
+    guide = '눌림목 분할 접근 · 보유';
+  } else {
+    label = '약세장';
+    tone = 'down_soft';
+    guide = '비중 축소 · 짧은 단타 대응';
+  }
+
+  return {
+    label,
+    tone,
+    guide,
+    ret20: Number(ret20.toFixed(1)),
+    dd60: Number(dd60.toFixed(1))
+  };
+}
+
+function getActiveRegime() {
+  const isStock = state.tab === 'STOCK';
+  const rows = isStock
+    ? (state.stockPayload && Array.isArray(state.stockPayload.rows) ? state.stockPayload.rows : [])
+    : (state.marketsData[state.tab] || []);
+  return classifyMarketRegime(rows);
+}
+
 function evaluateScalpCheck(nowMs) {
   const ms = Number.isFinite(nowMs) ? nowMs : Date.now();
   const kst = new Date(ms + 9 * 3600 * 1000);
@@ -762,7 +826,7 @@ function evaluateScalpCheck(nowMs) {
 
   // 2) 30분 흐름 / 선행지표 일치 체크
   const sKey = (isStock && sp ? sp.symbol : state.tab) + ':' + pr.phase;
-  const hist = state.scoreHistory[sKey] || [];
+  const hist = (state.lastTrendHist && Array.isArray(state.lastTrendHist[sKey])) ? state.lastTrendHist[sKey] : [];
   let c2Pass = false;
   let c2Title = '30분 흐름·선행지표';
   let c2Val = '데이터 누적 중';
@@ -884,7 +948,7 @@ function addJournalEntry(side) {
   });
   saveJournal(list);
   showToast(`${snap.name} ${side === 'buy' ? '매수' : '매도'} 기록 저장`);
-  renderScalpCard();
+  try { renderScalpCard(); } catch (e) { console.error('scalp render err:', e); }
   if (state.drawerOpen && state.drawerTab === 'journal') renderDrawer();
 }
 
@@ -929,7 +993,11 @@ function renderScalpCard() {
   box.style.border = `1px solid ${c.border}`;
   const chk = evaluateScalpCheck(Date.now());
   if (!chk) {
-    box.style.display = 'none';
+    box.style.display = 'block';
+    box.innerHTML = `<div class="flex items-center justify-between gap-2">
+      <div class="text-xs font-extrabold">단타 진입 체크</div>
+      <span class="text-[11px] font-bold opacity-60">${state.stockLoading ? '종목 데이터 불러오는 중...' : '예측 계산 대기'}</span>
+    </div>`;
     return;
   }
   box.style.display = 'block';
@@ -949,6 +1017,15 @@ function renderScalpCard() {
       </div>
       <span class="shrink-0 px-2.5 py-1 rounded-xl text-[11px] font-black" style="background-color:${vCol}1A; color:${vCol};">${chk.verdict} (${chk.passCount}/3)</span>
     </div>
+    ${(() => {
+      const rg = getActiveRegime();
+      if (!rg) return '';
+      const rgCol = (rg.tone === 'up' || rg.tone === 'up_soft') ? c.up : (rg.tone === 'down' || rg.tone === 'down_soft') ? c.down : c.muted;
+      return `<div class="mb-2 px-2.5 py-1.5 rounded-xl flex items-center justify-between gap-2 text-[10px] font-bold" style="background-color:${rgCol}12; color:${rgCol};">
+        <span class="font-black shrink-0">${rg.label}</span>
+        <span class="truncate">${rg.guide} (20일 ${fmtSigned(rg.ret20, '%')})</span>
+      </div>`;
+    })()}
     <div class="grid grid-cols-3 gap-1.5">
       ${chk.checks.map(it => {
         const dotCol = it.pass ? (chk.verdictTone === 'down' ? c.down : c.up) : c.muted;
@@ -1312,14 +1389,7 @@ function renderAll() {
       const on = state.stockQuery === name;
       return `<button data-preset="${name}" class="preset-btn px-3 py-1.5 rounded-full text-[11px] font-extrabold shrink-0 transition-colors" style="background-color:${on ? (d ? '#F8FAFC' : '#111827') : c.card}; color:${on ? (d ? '#111827' : '#FFFFFF') : c.muted}; border:1px solid ${c.border};">${name}</button>`;
     }).join('');
-    presetsEl.querySelectorAll('.preset-btn').forEach(b => {
-      b.addEventListener('click', () => {
-        state.stockQuery = b.dataset.preset;
-        safeWrite('daybook_v8_stock', state.stockQuery);
-        document.getElementById('stock-search-input').value = state.stockQuery;
-        fetchStockData(state.stockQuery);
-      });
-    });
+
   }
 
   // Resolve hero data (Index vs Stock)
@@ -1348,7 +1418,7 @@ function renderAll() {
     extraTag = curRow ? curRow[0] : '';
   } else {
     const sp = state.stockPayload;
-    nameStr = sp ? sp.name : state.stockQuery;
+    nameStr = state.stockLoading ? state.stockQuery : (sp ? sp.name : state.stockQuery);
     if (state.stockLoading) {
       extraTag = '조회 중...';
     } else if (state.stockError) {
@@ -1405,6 +1475,19 @@ function renderAll() {
   }
 
   document.getElementById('hero-name').textContent = nameStr;
+  const rgBadge = document.getElementById('hero-regime-badge');
+  if (rgBadge) {
+    const rg = (isStock && state.stockLoading) ? null : getActiveRegime();
+    if (rg) {
+      const rgCol = (rg.tone === 'up' || rg.tone === 'up_soft') ? c.up : (rg.tone === 'down' || rg.tone === 'down_soft') ? c.down : c.muted;
+      rgBadge.textContent = rg.label;
+      rgBadge.style.backgroundColor = rgCol + (rg.tone === 'up' || rg.tone === 'down' ? '24' : '16');
+      rgBadge.style.color = rgCol;
+      rgBadge.classList.remove('hidden');
+    } else {
+      rgBadge.classList.add('hidden');
+    }
+  }
   document.getElementById('hero-extra-tag').textContent = extraTag;
   document.getElementById('hero-price').textContent = priceStr;
 
@@ -1609,6 +1692,14 @@ async function fetchStockData(query, silent = false) {
     renderAll();
     return;
   }
+  const mySeq = ++state.stockReqSeq;
+  if (state.stockAbortCtrl) {
+    try { state.stockAbortCtrl.abort(); } catch (_) {}
+  }
+  const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  state.stockAbortCtrl = ctrl;
+  const timerId = ctrl ? setTimeout(() => { try { ctrl.abort(); } catch (_) {} }, 10000) : null;
+
   const hasExisting = Boolean(state.stockPayload && state.stockPayload.rows && state.stockPayload.rows.length);
   if (!silent || !hasExisting) {
     state.stockLoading = true;
@@ -1617,10 +1708,15 @@ async function fetchStockData(query, silent = false) {
   }
   try {
     const baseU = state.workerUrl.replace(/\/+$/, '');
+    const fetchOpts = ctrl ? { signal: ctrl.signal } : {};
+    const liveCtrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const liveTimer = liveCtrl ? setTimeout(() => { try { liveCtrl.abort(); } catch (_) {} }, 4500) : null;
     const [res, liveRes] = await Promise.all([
-      fetch(`${baseU}/stock?q=${encodeURIComponent(q)}`),
-      fetch(`${baseU}/live`).catch(() => null)
+      fetch(`${baseU}/stock?q=${encodeURIComponent(q)}`, fetchOpts),
+      fetch(`${baseU}/live`, liveCtrl ? { signal: liveCtrl.signal } : {}).catch(() => null)
     ]);
+    if (liveTimer) clearTimeout(liveTimer);
+    if (mySeq !== state.stockReqSeq) return;
     if (liveRes && liveRes.ok) {
       try {
         const ld = await liveRes.json();
@@ -1666,10 +1762,15 @@ async function fetchStockData(query, silent = false) {
     });
     if (state.stockPhaseResult) recordScoreDelta(data.symbol + ':' + state.stockPhaseResult.phase, (Number.isFinite(state.stockPhaseResult.dirScore) ? state.stockPhaseResult.dirScore : Math.round((state.stockPhaseResult.p - 0.5) * 200)));
   } catch (err) {
-    state.stockError = err.message || '종목 조회 실패';
+    if (mySeq !== state.stockReqSeq) return;
+    const isAbort = err && (err.name === 'AbortError' || String(err.message || '').includes('abort'));
+    state.stockError = isAbort ? '응답 시간 초과 — 다시 눌러 재시도해 주세요' : (err.message || '종목 조회 실패');
   } finally {
-    state.stockLoading = false;
-    renderAll();
+    if (timerId) clearTimeout(timerId);
+    if (mySeq === state.stockReqSeq) {
+      state.stockLoading = false;
+      renderAll();
+    }
   }
 }
 
@@ -1790,6 +1891,20 @@ function bindEvents() {
     safeWrite('daybook_v8_stock', val);
     fetchStockData(val);
   });
+
+  const presetsEl = document.getElementById('stock-presets');
+  if (presetsEl) {
+    presetsEl.addEventListener('click', e => {
+      const btn = e.target && e.target.closest ? e.target.closest('.preset-btn') : null;
+      if (!btn || !btn.dataset || !btn.dataset.preset) return;
+      const val = btn.dataset.preset;
+      state.stockQuery = val;
+      safeWrite('daybook_v8_stock', val);
+      const inp = document.getElementById('stock-search-input');
+      if (inp) inp.value = val;
+      fetchStockData(val, false);
+    });
+  }
 }
 
 
@@ -1813,7 +1928,7 @@ function getTickTarget() {
 }
 
 async function runSingleTick() {
-  if (!state.autoLive || document.hidden || !state.workerUrl || tickInFlight) return;
+  if (!state.autoLive || document.hidden || !state.workerUrl || tickInFlight || (state.tab === 'STOCK' && state.stockLoading)) return;
   const info = getTickTarget();
   if (!info) return;
   tickInFlight = true;
