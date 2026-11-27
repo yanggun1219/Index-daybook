@@ -469,6 +469,13 @@ function renderCandlestickChart(todayOpen, isIntraday, curPrice) {
     if (todayOpen < minV) minV = todayOpen;
     if (todayOpen > maxV) maxV = todayOpen;
   }
+  const snapChart = getCurrentAssetSnapshot();
+  const openPosChart = getOpenPositionSummary(snapChart.key, Number.isFinite(curPrice) ? curPrice : snapChart.price);
+  const showAvgLine = Boolean(openPosChart && Number.isFinite(openPosChart.avgPrice) && openPosChart.avgPrice > 0 && openPosChart.avgPrice >= minV * 0.72 && openPosChart.avgPrice <= maxV * 1.28);
+  if (showAvgLine) {
+    if (openPosChart.avgPrice < minV) minV = openPosChart.avgPrice;
+    if (openPosChart.avgPrice > maxV) maxV = openPosChart.avgPrice;
+  }
   const pad = (maxV - minV) * 0.12 || 1;
   minV -= pad;
   maxV += pad;
@@ -487,6 +494,15 @@ function renderCandlestickChart(todayOpen, isIntraday, curPrice) {
   if (isIntraday && Number.isFinite(todayOpen)) {
     const oy = yOf(todayOpen);
     html += `<line x1="${leftP}" y1="${oy.toFixed(1)}" x2="${W - rightP}" y2="${oy.toFixed(1)}" stroke="${openCol}" stroke-width="1.2" stroke-dasharray="4 3" />`;
+  }
+  if (showAvgLine) {
+    const ay = yOf(openPosChart.avgPrice);
+    const avgCol = '#F59E0B';
+    const pctTag = Number.isFinite(openPosChart.evalPct) ? ` (${fmtSigned(openPosChart.evalPct, '%')})` : '';
+    const avgTxt = `내 평단 ${openPosChart.pfx}${fmtNum(openPosChart.avgPrice, openPosChart.dec)}${openPosChart.ufx}${pctTag}`;
+    const txtY = ay > topP + 16 ? ay - 4 : ay + 12;
+    html += `<line x1="${leftP}" y1="${ay.toFixed(1)}" x2="${W - rightP}" y2="${ay.toFixed(1)}" stroke="${avgCol}" stroke-width="1.6" stroke-dasharray="5 3" />`;
+    html += `<text x="${leftP + 2}" y="${txtY.toFixed(1)}" fill="${avgCol}" font-size="9.5" font-weight="800">${avgTxt}</text>`;
   }
 
   const totalSlots = candles.length + (fCandle ? 1.4 : 0);
@@ -704,6 +720,37 @@ function saveJournal(arr) {
   safeWrite(JOURNAL_KEY, JSON.stringify((arr || []).slice(0, 80)));
 }
 
+
+function getOpenPositionSummary(assetKey, curPrice) {
+  const openList = loadJournal().filter(x => !Number.isFinite(x.retPct) && x.key === assetKey && Number.isFinite(x.entryPrice) && x.entryPrice > 0);
+  if (!openList.length) return null;
+  const side = openList[0].side || 'buy';
+  const sameSide = openList.filter(x => (x.side || 'buy') === side);
+  let totalQty = 0;
+  let totalCost = 0;
+  for (const it of sameSide) {
+    const q = Number(it.qty) > 0 ? Number(it.qty) : 1;
+    totalQty += q;
+    totalCost += it.entryPrice * q;
+  }
+  if (totalQty <= 0) return null;
+  const avgPrice = totalCost / totalQty;
+  const refP = Number.isFinite(curPrice) && curPrice > 0 ? curPrice : NaN;
+  const evalPct = Number.isFinite(refP)
+    ? Number((((refP / avgPrice) - 1) * 100 * (side === 'buy' ? 1 : -1)).toFixed(2))
+    : NaN;
+  return {
+    side,
+    totalQty,
+    avgPrice,
+    evalPct,
+    count: sameSide.length,
+    dec: sameSide[0].dec ?? 0,
+    pfx: sameSide[0].pfx || '',
+    ufx: sameSide[0].ufx || ''
+  };
+}
+
 function getCurrentAssetSnapshot() {
   const isStock = state.tab === 'STOCK';
   if (isStock && state.stockPayload && state.stockPayload.rows && state.stockPayload.rows.length) {
@@ -867,9 +914,13 @@ function evaluateScalpCheck(nowMs) {
     }
   }
 
-  // 1) 점수 강도 체크
-  const c1Pass = absSc >= minScore;
-  const c1Val = `${sc > 0 ? '+' : ''}${sc}점 (기준 ±${minScore})`;
+  // 1) 장세별 동적 점수 강도 체크 (하락장 매수는 +45점, 강세장 매수는 +28점)
+  const rgNow = getActiveRegime();
+  const effBuyMin = (rgNow && rgNow.tone === 'down') ? Math.max(minScore, 45) : (rgNow && rgNow.tone === 'up' ? Math.max(28, minScore - 5) : minScore);
+  const effMin = dir === 'up' ? effBuyMin : minScore;
+  const c1Pass = dir === 'up' ? (sc >= effBuyMin) : (dir === 'down' ? (absSc >= minScore) : false);
+  const c1RuleTxt = (dir === 'up' && rgNow && rgNow.tone === 'down') ? `하락장 +${effBuyMin}` : `기준 ±${effMin}`;
+  const c1Val = `${sc > 0 ? '+' : ''}${sc}점 (${c1RuleTxt})`;
 
   // 2) 30분 흐름 / 선행지표 일치 체크
   const sKey = (isStock && sp ? sp.symbol : state.tab) + ':' + pr.phase;
@@ -937,18 +988,17 @@ function evaluateScalpCheck(nowMs) {
     }
   }
 
-  const rgNow = getActiveRegime();
   const snapNow = getCurrentAssetSnapshot();
   const candlesNow2 = getCandlesForView().slice(-15);
   const fcGate = buildForecastCandle(candlesNow2, NaN, pr.phase === 'intraday', snapNow.price);
   const upsideLeftPct = (pr.phase === 'intraday' && fcGate && Number.isFinite(fcGate.close) && Number.isFinite(snapNow.price) && snapNow.price > 0)
     ? ((fcGate.close / snapNow.price) - 1) * 100
     : NaN;
-  const effBuyMin = (rgNow && rgNow.tone === 'down') ? Math.max(minScore, 45) : (rgNow && rgNow.tone === 'up' ? Math.max(28, minScore - 5) : minScore);
   const chaseRisk = (pr.phase === 'intraday' && dir === 'up' && Number.isFinite(upsideLeftPct) && upsideLeftPct < 0.55);
 
-  const openPos = loadJournal().find(x => !Number.isFinite(x.retPct) && x.key === snapNow.key);
+  const openPos = getOpenPositionSummary(snapNow.key, snapNow.price);
   let posAlert = '';
+  let posAlertTone = 'down';
   if (openPos) {
     const stopPrice = fcGate ? (openPos.side === 'buy' ? fcGate.low : fcGate.high) : NaN;
     const scoreFlipped = (openPos.side === 'buy' && sc <= -10) || (openPos.side === 'sell' && sc >= 10);
@@ -956,7 +1006,18 @@ function evaluateScalpCheck(nowMs) {
       (openPos.side === 'buy' && snapNow.price < stopPrice) || (openPos.side === 'sell' && snapNow.price > stopPrice)
     );
     if (scoreFlipped || stopBroken) {
-      posAlert = openPos.side === 'buy' ? '보유 매수 · 익절/손절 검토' : '보유 매도 · 청산 검토';
+      const sideNm = openPos.side === 'buy' ? '보유 매수' : '보유 매도';
+      if (Number.isFinite(openPos.evalPct)) {
+        if (openPos.evalPct >= 0) {
+          posAlert = `${sideNm} · 익절 검토 (${fmtSigned(openPos.evalPct, '%')})`;
+          posAlertTone = 'up';
+        } else {
+          posAlert = `${sideNm} · 손절 검토 (${fmtSigned(openPos.evalPct, '%')})`;
+          posAlertTone = 'down';
+        }
+      } else {
+        posAlert = `${sideNm} · 청산 검토`;
+      }
     }
   }
 
@@ -965,11 +1026,11 @@ function evaluateScalpCheck(nowMs) {
   let verdictTone = 'flat';
   if (posAlert) {
     verdict = posAlert;
-    verdictTone = 'down';
+    verdictTone = posAlertTone;
   } else if (windowCode === 'open_noise' && passCount < 3) {
     verdict = '09:15 이후 진입 권장';
     verdictTone = 'flat';
-  } else if (sc >= effBuyMin && passCount >= 2 && dir === 'up') {
+  } else if (c1Pass && passCount >= 2 && dir === 'up') {
     if (chaseRisk) {
       verdict = `눌림목 대기 (여력 +${upsideLeftPct.toFixed(2)}%)`;
       verdictTone = 'flat';
@@ -980,6 +1041,9 @@ function evaluateScalpCheck(nowMs) {
   } else if (c1Pass && passCount >= 2 && dir === 'down') {
     verdict = windowCode === 'nxt_pre' ? '하락 반전 · 프리장 정리 검토' : (passCount === 3 ? '강한 매도·인버스' : '매도·인버스 우세');
     verdictTone = 'down';
+  } else if (dir === 'up' && !c1Pass && rgNow && rgNow.tone === 'down' && sc >= minScore) {
+    verdict = `하락장 관망 (+${effBuyMin}점↑ 필요)`;
+    verdictTone = 'flat';
   }
 
   return {
@@ -994,7 +1058,8 @@ function evaluateScalpCheck(nowMs) {
       { title: c2Title, val: c2Val, pass: c2Pass },
       { title: c3Title, val: c3Val, pass: c3Pass }
     ],
-    score: sc
+    score: sc,
+    openPos
   };
 }
 
@@ -1037,8 +1102,7 @@ function addJournalEntry(side, opts) {
   saveJournal(list);
   state.quickEntrySide = null;
   showToast(`${snap.name} ${side === 'buy' ? '매수' : '매도'} ${qty}주 일지 저장`);
-  try { renderScalpCard(); } catch (e) { console.error(e); }
-  if (state.drawerOpen && state.drawerTab === 'journal') renderDrawer();
+  renderAll();
 }
 
 function closeJournalEntry(id, customPrice) {
@@ -1069,8 +1133,7 @@ function closeJournalEntry(id, customPrice) {
   it.exitTime = `${String(now.getUTCMonth() + 1).padStart(2, '0')}/${String(now.getUTCDate()).padStart(2, '0')} ${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}`;
   saveJournal(list);
   showToast(`${it.name} 청산 (${fmtSigned(it.retPct, '%')} · 세후)`);
-  try { renderScalpCard(); } catch (e) { console.error(e); }
-  if (state.drawerOpen && state.drawerTab === 'journal') renderDrawer();
+  renderAll();
 }
 
 function deleteJournalEntry(id) {
@@ -1205,6 +1268,14 @@ function renderScalpCard() {
         <span class="truncate">${rg.guide} (20일 ${fmtSigned(rg.ret20, '%')})</span>
       </div>`;
     })()}
+    ${chk.openPos ? (() => {
+      const p = chk.openPos;
+      const pCol = Number.isFinite(p.evalPct) ? (p.evalPct >= 0 ? c.up : c.down) : c.muted;
+      return `<div class="mb-2 px-2.5 py-1.5 rounded-xl flex items-center justify-between gap-2 text-[10.5px] font-bold tabular" style="background-color:rgba(245,158,11,0.12); color:${state.dark ? '#FCD34D' : '#B45309'};">
+        <span>보유 ${p.side === 'buy' ? '매수' : '매도'} ${p.totalQty}주 · 평단 ${p.pfx}${fmtNum(p.avgPrice, p.dec)}${p.ufx}</span>
+        <span class="font-black" style="color:${pCol}">${Number.isFinite(p.evalPct) ? fmtSigned(p.evalPct, '%') : '-'}</span>
+      </div>`;
+    })() : ''}
     <div class="grid grid-cols-3 gap-1.5">
       ${chk.checks.map(it => {
         const dotCol = it.pass ? (chk.verdictTone === 'down' ? c.down : c.up) : c.muted;
