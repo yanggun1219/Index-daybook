@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="theme-color" content="#FFFFFF" id="meta-theme-color" />
-  <title>지수 관측소 v10.1</title>
+  <title>지수 관측소 v10.2</title>
   <link rel="icon" type="image/png" href="icon-512.png" />
   <link rel="apple-touch-icon" href="icon-512.png" />
   <link rel="manifest" href="manifest.json" />
@@ -59,7 +59,7 @@
         <div class="flex items-center gap-2.5">
           <div id="brand-icon" class="w-8 h-8 rounded-xl flex items-center justify-center shrink-0"></div>
           <div>
-            <div class="font-black text-[15px] tracking-tight leading-tight flex items-center gap-1.5">지수 관측소 <span class="text-[10px] font-bold opacity-55">v10.1</span></div>
+            <div class="font-black text-[15px] tracking-tight leading-tight flex items-center gap-1.5">지수 관측소 <span class="text-[10px] font-bold opacity-55">v10.2</span></div>
             <div id="header-stamp" class="text-[11px] font-semibold opacity-60 tabular leading-tight">종가 기준</div>
           </div>
         </div>
@@ -84,8 +84,9 @@
     <main class="max-w-lg mx-auto px-4 pt-4 space-y-4">
       <!-- Stock Selector Bar (Visible only on STOCK tab) -->
       <section id="stock-bar" class="hidden space-y-2.5">
-        <form id="stock-search-form" class="flex items-center gap-2">
-          <input id="stock-search-input" type="text" placeholder="종목명 · 6자리 코드 · 미국 티커 (예: SK하이닉스, NVDA)" class="flex-1 px-3.5 py-2.5 rounded-2xl text-xs font-bold outline-none transition-colors" />
+        <form id="stock-search-form" class="flex items-center gap-1.5">
+          <input id="stock-search-input" type="text" placeholder="종목명 · 6자리 코드 · 미국 티커 (예: SK하이닉스, NVDA)" class="flex-1 min-w-0 px-3.5 py-2.5 rounded-2xl text-xs font-bold outline-none transition-colors" />
+          <button id="btn-fav-stock" type="button" title="관심종목 추가/해제" class="px-3 py-2.5 rounded-2xl text-xs font-extrabold shrink-0 transition-colors">☆</button>
           <button id="stock-search-btn" type="submit" class="px-4 py-2.5 rounded-2xl text-xs font-extrabold shrink-0 transition-colors">조회</button>
         </form>
         <div id="stock-presets" class="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-0.5"></div>
@@ -192,7 +193,7 @@
 
   <script>if('serviceWorker' in navigator){navigator.serviceWorker.getRegistrations().then(rs=>rs.forEach(r=>r.unregister())).catch(()=>{});}</script>
   <script src="data.js"></script>
-  <script src="model.js?v=1010"></script>
-  <script src="app.js?v=1010"></script>
+  <script src="model.js?v=1020"></script>
+  <script src="app.js?v=1020"></script>
 </body>
 </html>

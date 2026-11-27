@@ -2,6 +2,44 @@
 
 const DEFAULT_WORKER_URL = 'https://index-daybook-live.yanggun1219.workers.dev';
 const MARKET_LABELS = { KOSPI: '코스피', KOSDAQ: '코스닥', NASDAQ: '나스닥 종합' };
+
+const FAV_STOCKS_KEY = 'daybook_v10_favs';
+
+function loadFavStocks() {
+  try {
+    const arr = JSON.parse(safeRead(FAV_STOCKS_KEY, '[]'));
+    return Array.isArray(arr) ? arr.filter(x => typeof x === 'string' && x.trim()) : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function saveFavStocks(arr) {
+  const uniq = [];
+  for (const s of (arr || [])) {
+    const t = String(s || '').trim();
+    if (t && !uniq.includes(t)) uniq.push(t);
+  }
+  safeWrite(FAV_STOCKS_KEY, JSON.stringify(uniq.slice(0, 20)));
+}
+
+function toggleFavStock(name) {
+  const target = String(name || '').trim();
+  if (!target) return;
+  const favs = loadFavStocks();
+  const idx = favs.indexOf(target);
+  if (idx >= 0) {
+    favs.splice(idx, 1);
+    saveFavStocks(favs);
+    showToast(`관심종목에서 '${target}' 제외`);
+  } else {
+    favs.unshift(target);
+    saveFavStocks(favs);
+    showToast(`관심종목에 '${target}' 추가`);
+  }
+  renderAll();
+}
+
 const STOCK_PRESETS = [
   'SK하이닉스', '삼성전자', 'LG에너지솔루션', '현대차',
   'HD현대중공업', '셀트리온', 'KB금융', 'NAVER', '엔비디아', '테슬라'
@@ -1725,10 +1763,26 @@ function renderAll() {
     inp.style.color = c.text;
     sBtn.style.backgroundColor = d ? '#F8FAFC' : '#111827';
     sBtn.style.color = d ? '#111827' : '#FFFFFF';
+    const favs = loadFavStocks();
+    const curLabel = (state.stockPayload && state.stockPayload.name && !state.stockLoading) ? state.stockPayload.name : state.stockQuery;
+    const isFavNow = Boolean(curLabel && (favs.includes(curLabel) || favs.includes(state.stockQuery)));
+    const favBtn = document.getElementById('btn-fav-stock');
+    if (favBtn) {
+      favBtn.textContent = isFavNow ? '★' : '☆';
+      favBtn.style.backgroundColor = isFavNow ? 'rgba(245,158,11,0.18)' : c.card;
+      favBtn.style.color = isFavNow ? '#F59E0B' : c.muted;
+      favBtn.style.border = `1px solid ${isFavNow ? 'rgba(245,158,11,0.45)' : c.border}`;
+    }
+    const mergedPresets = [...favs, ...STOCK_PRESETS.filter(n => !favs.includes(n))];
     const presetsEl = document.getElementById('stock-presets');
-    presetsEl.innerHTML = STOCK_PRESETS.map(name => {
-      const on = state.stockQuery === name;
-      return `<button data-preset="${name}" class="preset-btn px-3 py-1.5 rounded-full text-[11px] font-extrabold shrink-0 transition-colors" style="background-color:${on ? (d ? '#F8FAFC' : '#111827') : c.card}; color:${on ? (d ? '#111827' : '#FFFFFF') : c.muted}; border:1px solid ${c.border};">${name}</button>`;
+    presetsEl.innerHTML = mergedPresets.map(name => {
+      const isFav = favs.includes(name);
+      const on = state.stockQuery === name || curLabel === name;
+      const bg = on ? (d ? '#F8FAFC' : '#111827') : (isFav ? (d ? 'rgba(245,158,11,0.14)' : '#FFFBEB') : c.card);
+      const col = on ? (d ? '#111827' : '#FFFFFF') : (isFav ? (d ? '#FCD34D' : '#B45309') : c.muted);
+      const bd = isFav && !on ? 'rgba(245,158,11,0.38)' : c.border;
+      const rmBtn = isFav ? `<span data-fav-rm="${name}" class="ml-1 opacity-65 hover:opacity-100" style="padding:0 2px;">×</span>` : '';
+      return `<button data-preset="${name}" class="preset-btn inline-flex items-center px-3 py-1.5 rounded-full text-[11px] font-extrabold shrink-0 transition-colors" style="background-color:${bg}; color:${col}; border:1px solid ${bd};">${isFav ? '★ ' : ''}${name}${rmBtn}</button>`;
     }).join('');
 
   }
@@ -2237,9 +2291,24 @@ function bindEvents() {
     fetchStockData(val);
   });
 
+  const favBtn = document.getElementById('btn-fav-stock');
+  if (favBtn) {
+    favBtn.addEventListener('click', () => {
+      const inpVal = (document.getElementById('stock-search-input')?.value || '').trim();
+      const target = inpVal || (state.stockPayload && state.stockPayload.name) || state.stockQuery;
+      toggleFavStock(target);
+    });
+  }
+
   const presetsEl = document.getElementById('stock-presets');
   if (presetsEl) {
     presetsEl.addEventListener('click', e => {
+      const rm = e.target && e.target.closest ? e.target.closest('[data-fav-rm]') : null;
+      if (rm && rm.dataset && rm.dataset.favRm) {
+        e.stopPropagation();
+        toggleFavStock(rm.dataset.favRm);
+        return;
+      }
       const btn = e.target && e.target.closest ? e.target.closest('.preset-btn') : null;
       if (!btn || !btn.dataset || !btn.dataset.preset) return;
       const val = btn.dataset.preset;
