@@ -55,6 +55,7 @@ const state = {
   aiBriefLoading: false,
   aiBriefCache: {},
   aiBriefError: '',
+  quickEntrySide: null,
   autoLive: safeRead('daybook_v9_autolive', '1') === '1',
   lastTickPrice: null
 };
@@ -264,6 +265,17 @@ function getSignalSvg(dir, color) {
   </svg>`;
 }
 
+function fmtEok(v) {
+  if (!Number.isFinite(v)) return '대기';
+  return (v > 0 ? '+' : '') + fmtNum(v, 0) + '억';
+}
+function fmtQty(v) {
+  if (!Number.isFinite(v)) return '대기';
+  const a = Math.abs(v);
+  if (a >= 10000) return (v > 0 ? '+' : '-') + (a / 10000).toFixed(1) + '만주';
+  return (v > 0 ? '+' : '') + fmtNum(v, 0) + '주';
+}
+
 function fmtNum(v, decimals) {
   if (!Number.isFinite(v)) return '-';
   return v.toLocaleString('ko-KR', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
@@ -329,7 +341,8 @@ function computeActiveIndex() {
     esPct: futObj.ES_pct,
     fxPct,
     k200Pct: futObj.K200_pct,
-    investor: state.liveInvestors[key] || null
+    investor: state.liveInvestors[key] || null,
+    futFrgnEok: (key === 'KOSPI' && state.liveInvestors.FUTURES && Number.isFinite(state.liveInvestors.FUTURES.frgn)) ? state.liveInvestors.FUTURES.frgn : NaN
   });
 }
 
@@ -618,7 +631,21 @@ function renderContextPanel() {
           <div class="text-[10px] font-bold opacity-65">기관 (가집계)</div>
           <div class="text-sm font-black tabular mt-0.5" style="color:${oCol}">${inv ? fmtQty(inv.orgnQty) : '집계 대기'}</div>
         </div>
-      </div>`;
+      </div>` + (sp.leverageEtf ? (() => {
+        const le = sp.leverageEtf;
+        const lCol = le.pct >= 0 ? c.up : c.down;
+        const dCol = Math.abs(le.disparityPct) >= 0.8 ? (le.disparityPct > 0 ? c.up : c.down) : c.muted;
+        return `<div class="mt-2 p-2.5 rounded-2xl flex items-center justify-between gap-2 text-[11px]" style="${tileStyle}">
+          <div class="min-w-0">
+            <div class="font-extrabold truncate">${le.name} (${le.code})</div>
+            <div class="text-[10px] font-bold opacity-65">${le.rebalLabel} · 괴리 <span style="color:${dCol}">${fmtSigned(le.disparityPct, '%')}</span></div>
+          </div>
+          <div class="text-right shrink-0 tabular">
+            <div class="font-black" style="color:${lCol}">${fmtNum(le.price, 0)}원</div>
+            <div class="text-[10px] font-extrabold" style="color:${lCol}">${fmtSigned(le.pct, '%')}</div>
+          </div>
+        </div>`;
+      })() : '');
     return;
   }
 
@@ -646,7 +673,15 @@ function renderContextPanel() {
       <span class="text-[10px] font-bold opacity-55">${inv ? '실시간 (억원)' : '장중 집계 대기'}</span>
     </div>
     <div class="grid grid-cols-3 gap-2">${topRow.map(mkTile).join('')}</div>
-    <div class="grid grid-cols-3 gap-2 mt-2">${subRow.map(mkTile).join('')}</div>`;
+    <div class="grid grid-cols-3 gap-2 mt-2">${subRow.map(mkTile).join('')}</div>` + (state.tab === 'KOSPI' && state.liveInvestors.FUTURES ? (() => {
+      const fi = state.liveInvestors.FUTURES;
+      const ffCol = fi.frgn >= 0 ? c.up : c.down;
+      const foCol = fi.orgn >= 0 ? c.up : c.down;
+      return `<div class="mt-2 p-2.5 rounded-2xl flex items-center justify-between text-[11px] tabular" style="${tileStyle}">
+        <span class="font-extrabold opacity-75">코스피200 선물 수급</span>
+        <span>외국인 <b style="color:${ffCol}">${fmtEok(fi.frgn)}</b> · 기관 <b style="color:${foCol}">${fmtEok(fi.orgn)}</b></span>
+      </div>`;
+    })() : '');
 }
 
 
@@ -902,17 +937,48 @@ function evaluateScalpCheck(nowMs) {
     }
   }
 
+  const rgNow = getActiveRegime();
+  const snapNow = getCurrentAssetSnapshot();
+  const candlesNow2 = getCandlesForView().slice(-15);
+  const fcGate = buildForecastCandle(candlesNow2, NaN, pr.phase === 'intraday', snapNow.price);
+  const upsideLeftPct = (pr.phase === 'intraday' && fcGate && Number.isFinite(fcGate.close) && Number.isFinite(snapNow.price) && snapNow.price > 0)
+    ? ((fcGate.close / snapNow.price) - 1) * 100
+    : NaN;
+  const effBuyMin = (rgNow && rgNow.tone === 'down') ? Math.max(minScore, 45) : (rgNow && rgNow.tone === 'up' ? Math.max(28, minScore - 5) : minScore);
+  const chaseRisk = (pr.phase === 'intraday' && dir === 'up' && Number.isFinite(upsideLeftPct) && upsideLeftPct < 0.55);
+
+  const openPos = loadJournal().find(x => !Number.isFinite(x.retPct) && x.key === snapNow.key);
+  let posAlert = '';
+  if (openPos) {
+    const stopPrice = fcGate ? (openPos.side === 'buy' ? fcGate.low : fcGate.high) : NaN;
+    const scoreFlipped = (openPos.side === 'buy' && sc <= -10) || (openPos.side === 'sell' && sc >= 10);
+    const stopBroken = Number.isFinite(stopPrice) && Number.isFinite(snapNow.price) && (
+      (openPos.side === 'buy' && snapNow.price < stopPrice) || (openPos.side === 'sell' && snapNow.price > stopPrice)
+    );
+    if (scoreFlipped || stopBroken) {
+      posAlert = openPos.side === 'buy' ? '보유 매수 · 익절/손절 검토' : '보유 매도 · 청산 검토';
+    }
+  }
+
   const passCount = (c1Pass ? 1 : 0) + (c2Pass ? 1 : 0) + (c3Pass ? 1 : 0);
   let verdict = '관망 (조건 미달)';
   let verdictTone = 'flat';
-  if (windowCode === 'open_noise' && passCount < 3) {
+  if (posAlert) {
+    verdict = posAlert;
+    verdictTone = 'down';
+  } else if (windowCode === 'open_noise' && passCount < 3) {
     verdict = '09:15 이후 진입 권장';
     verdictTone = 'flat';
-  } else if (c1Pass && passCount >= 2 && dir === 'up') {
-    verdict = windowCode === 'nxt_pre' ? '상승 유지 · 홀딩 우세' : '매수 진입 우세';
-    verdictTone = 'up';
+  } else if (sc >= effBuyMin && passCount >= 2 && dir === 'up') {
+    if (chaseRisk) {
+      verdict = `눌림목 대기 (여력 +${upsideLeftPct.toFixed(2)}%)`;
+      verdictTone = 'flat';
+    } else {
+      verdict = windowCode === 'nxt_pre' ? '상승 유지 · 홀딩 우세' : (passCount === 3 ? '강한 매수 신호' : '분할 매수 우세');
+      verdictTone = 'up';
+    }
   } else if (c1Pass && passCount >= 2 && dir === 'down') {
-    verdict = windowCode === 'nxt_pre' ? '하락 반전 · 프리장 정리 검토' : '매도·인버스 우세';
+    verdict = windowCode === 'nxt_pre' ? '하락 반전 · 프리장 정리 검토' : (passCount === 3 ? '강한 매도·인버스' : '매도·인버스 우세');
     verdictTone = 'down';
   }
 
@@ -932,26 +998,36 @@ function evaluateScalpCheck(nowMs) {
   };
 }
 
-function addJournalEntry(side) {
+function addJournalEntry(side, opts) {
+  const o = opts || {};
   const snap = getCurrentAssetSnapshot();
-  if (!Number.isFinite(snap.price) || snap.price <= 0) {
+  const entryP = (Number.isFinite(Number(o.price)) && Number(o.price) > 0) ? Number(o.price) : snap.price;
+  if (!Number.isFinite(entryP) || entryP <= 0) {
     showToast('현재가를 불러온 뒤 기록해 주세요');
     return;
   }
+  const qty = (Number.isFinite(Number(o.qty)) && Number(o.qty) > 0) ? Number(o.qty) : 1;
   const chk = evaluateScalpCheck(Date.now());
+  const rg = getActiveRegime();
   const list = loadJournal();
   const now = new Date(Date.now() + 9 * 3600 * 1000);
   const stamp = `${String(now.getUTCMonth() + 1).padStart(2, '0')}/${String(now.getUTCDate()).padStart(2, '0')} ${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}`;
+  const feeRate = (snap.isStock && snap.isKr) ? 0.0018 : 0.0003;
   list.unshift({
     id: String(Date.now()),
     key: snap.key,
     name: snap.name,
-    side, // 'buy' | 'sell'
-    entryPrice: snap.price,
+    side,
+    entryPrice: entryP,
+    qty,
+    feeRate,
     exitPrice: null,
     retPct: null,
+    netPnl: null,
     score: chk ? chk.score : 0,
-    strategy: chk ? chk.strategyTag : '단타',
+    regime: rg ? rg.label : '-',
+    strategy: String(o.strategy || (chk ? chk.strategyTag : '단타')).trim(),
+    memo: String(o.memo || '').trim().slice(0, 80),
     dec: snap.dec,
     pfx: snap.pfx,
     ufx: snap.ufx,
@@ -959,8 +1035,9 @@ function addJournalEntry(side) {
     exitTime: ''
   });
   saveJournal(list);
-  showToast(`${snap.name} ${side === 'buy' ? '매수' : '매도'} 기록 저장`);
-  try { renderScalpCard(); } catch (e) { console.error('scalp render err:', e); }
+  state.quickEntrySide = null;
+  showToast(`${snap.name} ${side === 'buy' ? '매수' : '매도'} ${qty}주 일지 저장`);
+  try { renderScalpCard(); } catch (e) { console.error(e); }
   if (state.drawerOpen && state.drawerTab === 'journal') renderDrawer();
 }
 
@@ -979,14 +1056,20 @@ function closeJournalEntry(id, customPrice) {
     }
   }
   if (!Number.isFinite(exitP) || exitP <= 0) return;
+  const qty = Number(it.qty) > 0 ? Number(it.qty) : 1;
+  const feeRate = Number.isFinite(it.feeRate) ? it.feeRate : 0.0018;
   const rawPct = ((exitP / it.entryPrice) - 1) * 100;
+  const signedPct = (it.side === 'buy' ? rawPct : -rawPct) - feeRate * 100;
+  const grossPnl = (it.side === 'buy' ? (exitP - it.entryPrice) : (it.entryPrice - exitP)) * qty;
+  const netPnl = grossPnl - (exitP * qty * feeRate);
   it.exitPrice = exitP;
-  it.retPct = Number((it.side === 'buy' ? rawPct : -rawPct).toFixed(2));
+  it.retPct = Number(signedPct.toFixed(2));
+  it.netPnl = Math.round(netPnl);
   const now = new Date(Date.now() + 9 * 3600 * 1000);
   it.exitTime = `${String(now.getUTCMonth() + 1).padStart(2, '0')}/${String(now.getUTCDate()).padStart(2, '0')} ${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}`;
   saveJournal(list);
-  showToast(`${it.name} 청산 완료 (${fmtSigned(it.retPct, '%')})`);
-  renderScalpCard();
+  showToast(`${it.name} 청산 (${fmtSigned(it.retPct, '%')} · 세후)`);
+  try { renderScalpCard(); } catch (e) { console.error(e); }
   if (state.drawerOpen && state.drawerTab === 'journal') renderDrawer();
 }
 
@@ -1030,6 +1113,8 @@ async function requestAiBrief() {
   if (Number.isFinite(fut.NQ_pct)) ctxParts.push(`나스닥선물 ${fmtSigned(fut.NQ_pct, '%')}`);
   if (Number.isFinite(fut.EWY_pct)) ctxParts.push(`EWY ${fmtSigned(fut.EWY_pct, '%')}`);
   if (Number.isFinite(fut.K200_pct)) ctxParts.push(`코스피200선물 ${fmtSigned(fut.K200_pct, '%')}`);
+  if (state.liveInvestors.FUTURES && Number.isFinite(state.liveInvestors.FUTURES.frgn)) ctxParts.push(`코스피200 외인선물 ${fmtEok(state.liveInvestors.FUTURES.frgn)}`);
+  if (isStock && sp && sp.leverageEtf) ctxParts.push(`${sp.leverageEtf.name} ${fmtSigned(sp.leverageEtf.pct, '%')} (괴리 ${fmtSigned(sp.leverageEtf.disparityPct, '%')}, ${sp.leverageEtf.rebalLabel})`);
   if (!isStock && state.liveInvestors[state.tab]) {
     const iv = state.liveInvestors[state.tab];
     ctxParts.push(`외국인 ${fmtEok(iv.frgn)}, 기관 ${fmtEok(iv.orgn)}, 개인 ${fmtEok(iv.prsn)}`);
@@ -1137,6 +1222,31 @@ function renderScalpCard() {
       </div>
       <button id="btn-open-journal" class="px-2.5 py-1.5 rounded-xl text-[11px] font-bold transition-colors" style="${tileStyle} color:${c.text};">기록 ${list.length}건 · ${winStr} ▸</button>
     </div>
+    ${state.quickEntrySide ? (() => {
+      const snapQ = getCurrentAssetSnapshot();
+      const sCol = state.quickEntrySide === 'buy' ? c.up : c.down;
+      return `<div class="mt-2.5 p-3 rounded-2xl space-y-2 text-[11px]" style="${tileStyle}">
+        <div class="flex items-center justify-between">
+          <span class="font-black" style="color:${sCol}">${snapQ.name} ${state.quickEntrySide === 'buy' ? '매수' : '매도'} 매매일지 기록</span>
+          <button id="btn-qe-cancel" class="text-[10px] font-bold opacity-60">닫기</button>
+        </div>
+        <div class="grid grid-cols-3 gap-1.5">
+          <input id="qe-price" type="number" step="any" value="${Number.isFinite(snapQ.price) ? snapQ.price : ''}" placeholder="체결가" class="px-2 py-1.5 rounded-xl font-bold outline-none tabular" style="background-color:${c.card}; color:${c.text}; border:1px solid ${c.border};" />
+          <input id="qe-qty" type="number" min="1" step="1" value="1" placeholder="수량" class="px-2 py-1.5 rounded-xl font-bold outline-none tabular" style="background-color:${c.card}; color:${c.text}; border:1px solid ${c.border};" />
+          <select id="qe-strat" class="px-2 py-1.5 rounded-xl font-bold outline-none" style="background-color:${c.card}; color:${c.text}; border:1px solid ${c.border};">
+            <option value="${chk.strategyTag}">${chk.strategyTag}</option>
+            <option value="장중 단타">장중 단타</option>
+            <option value="NXT 20시 종베">NXT 20시 종베</option>
+            <option value="정규장 종베">정규장 종베</option>
+            <option value="눌림목 매수">눌림목 매수</option>
+          </select>
+        </div>
+        <div class="flex items-center gap-1.5">
+          <input id="qe-memo" type="text" placeholder="진입 근거·복기 메모 (선택)" class="flex-1 px-2.5 py-1.5 rounded-xl font-semibold outline-none" style="background-color:${c.card}; color:${c.text}; border:1px solid ${c.border};" />
+          <button id="btn-qe-save" class="px-3 py-1.5 rounded-xl font-black shrink-0" style="background-color:${sCol}; color:#FFFFFF;">저장</button>
+        </div>
+      </div>`;
+    })() : ''}
     ${(() => {
       const snapKey = getCurrentAssetSnapshot().key;
       const cached = state.aiBriefCache[snapKey];
@@ -1161,8 +1271,19 @@ function renderScalpCard() {
   const bBuy = document.getElementById('btn-scalp-buy');
   const bSell = document.getElementById('btn-scalp-sell');
   const bOpen = document.getElementById('btn-open-journal');
-  if (bBuy) bBuy.onclick = () => addJournalEntry('buy');
-  if (bSell) bSell.onclick = () => addJournalEntry('sell');
+  if (bBuy) bBuy.onclick = () => { state.quickEntrySide = state.quickEntrySide === 'buy' ? null : 'buy'; renderScalpCard(); };
+  if (bSell) bSell.onclick = () => { state.quickEntrySide = state.quickEntrySide === 'sell' ? null : 'sell'; renderScalpCard(); };
+  const qSave = document.getElementById('btn-qe-save');
+  if (qSave) qSave.onclick = () => {
+    addJournalEntry(state.quickEntrySide || 'buy', {
+      price: Number(String(document.getElementById('qe-price')?.value || '').replace(/,/g, '')),
+      qty: Number(document.getElementById('qe-qty')?.value || 1),
+      strategy: document.getElementById('qe-strat')?.value || '',
+      memo: document.getElementById('qe-memo')?.value || ''
+    });
+  };
+  const qCancel = document.getElementById('btn-qe-cancel');
+  if (qCancel) qCancel.onclick = () => { state.quickEntrySide = null; renderScalpCard(); };
   if (bOpen) bOpen.onclick = () => {
     state.drawerOpen = true;
     state.drawerTab = 'journal';
@@ -1281,18 +1402,24 @@ function renderDrawer() {
     const avgCol = Number.isFinite(avgRet) ? (avgRet >= 0 ? c.up : c.down) : c.muted;
     const snap = getCurrentAssetSnapshot();
 
+    const totalPnl = closed.reduce((s, x) => s + (Number.isFinite(x.netPnl) ? x.netPnl : 0), 0);
+    const pnlCol = totalPnl > 0 ? c.up : totalPnl < 0 ? c.down : c.muted;
+    const hiSig = closed.filter(x => Math.abs(x.score || 0) >= 40);
+    const hiWins = hiSig.filter(x => x.retPct > 0).length;
     let html = `<div class="grid grid-cols-3 gap-2 text-center">
       <div class="p-2.5 rounded-2xl" style="${tileStyle}">
-        <div class="text-[10px] font-bold opacity-65">승률</div>
+        <div class="text-[10px] font-bold opacity-65">전체 승률</div>
         <div class="text-sm font-black tabular mt-0.5">${closed.length ? Math.round((wins / closed.length) * 100) + '%' : '-'}</div>
+        <div class="text-[9px] font-bold opacity-55">±40점+: ${hiSig.length ? Math.round((hiWins / hiSig.length) * 100) + '%' : '-'}</div>
       </div>
       <div class="p-2.5 rounded-2xl" style="${tileStyle}">
-        <div class="text-[10px] font-bold opacity-65">평균 수익률</div>
+        <div class="text-[10px] font-bold opacity-65">평균 수익률 (세후)</div>
         <div class="text-sm font-black tabular mt-0.5" style="color:${avgCol}">${Number.isFinite(avgRet) ? fmtSigned(avgRet, '%') : '-'}</div>
       </div>
       <div class="p-2.5 rounded-2xl" style="${tileStyle}">
-        <div class="text-[10px] font-bold opacity-65">완료 / 전체</div>
-        <div class="text-sm font-black tabular mt-0.5">${closed.length} / ${list.length}</div>
+        <div class="text-[10px] font-bold opacity-65">누적 순손익</div>
+        <div class="text-sm font-black tabular mt-0.5" style="color:${pnlCol}">${closed.length ? (totalPnl >= 0 ? '+' : '') + fmtNum(totalPnl, 0) : '-'}</div>
+        <div class="text-[9px] font-bold opacity-55">${closed.length}/${list.length}건</div>
       </div>
     </div>`;
 
@@ -1317,8 +1444,9 @@ function renderDrawer() {
             </div>
             <button data-jdel="${it.id}" class="text-[10px] font-bold opacity-50 px-1.5">삭제</button>
           </div>
+          ${it.memo ? `<div class="mt-1 text-[10.5px] opacity-75">📝 ${it.memo}</div>` : ''}
           <div class="mt-1.5 flex items-center justify-between gap-2 text-[11px] tabular">
-            <span class="opacity-75">${it.entryTime} · ${it.pfx}${fmtNum(it.entryPrice, it.dec)}${it.ufx}${isClosed ? ` → ${it.pfx}${fmtNum(it.exitPrice, it.dec)}${it.ufx}` : ''}</span>
+            <span class="opacity-75">${it.entryTime} · ${it.qty || 1}주 · ${it.pfx}${fmtNum(it.entryPrice, it.dec)}${it.ufx}${isClosed ? ` → ${it.pfx}${fmtNum(it.exitPrice, it.dec)}${it.ufx}` : ''}</span>
             ${isClosed
               ? `<span class="font-black" style="color:${retCol}">${fmtSigned(it.retPct, '%')}</span>`
               : `<div class="flex items-center gap-1.5">
@@ -1330,7 +1458,11 @@ function renderDrawer() {
         </div>`;
       }
       html += `</div>`;
-      html += `<button id="btn-journal-clear" class="w-full py-2 rounded-xl text-[11px] font-bold opacity-65" style="${tileStyle}">기록 전체 초기화</button>`;
+      html += `<div class="grid grid-cols-3 gap-1.5">
+        <button id="btn-journal-export" class="py-2 rounded-xl text-[11px] font-bold" style="${tileStyle}">JSON 백업</button>
+        <button id="btn-journal-import" class="py-2 rounded-xl text-[11px] font-bold" style="${tileStyle}">JSON 복원</button>
+        <button id="btn-journal-clear" class="py-2 rounded-xl text-[11px] font-bold opacity-65" style="${tileStyle}">전체 초기화</button>
+      </div>`;
     }
     area.innerHTML = html;
     area.querySelectorAll('[data-jclose]').forEach(btn => {
@@ -1345,6 +1477,30 @@ function renderDrawer() {
       showToast('매매 기록을 초기화했어요');
       renderScalpCard();
       renderDrawer();
+    });
+    const expBtn = document.getElementById('btn-journal-export');
+    if (expBtn) expBtn.addEventListener('click', () => {
+      const txt = JSON.stringify(loadJournal());
+      if (typeof navigator !== 'undefined' && navigator.clipboard) {
+        navigator.clipboard.writeText(txt).then(() => showToast('매매일지 JSON을 클립보드에 복사했어요')).catch(() => prompt('아래 JSON을 복사해 보관하세요', txt));
+      } else if (typeof prompt === 'function') {
+        prompt('아래 JSON을 복사해 보관하세요', txt);
+      }
+    });
+    const impBtn = document.getElementById('btn-journal-import');
+    if (impBtn) impBtn.addEventListener('click', () => {
+      const raw = typeof prompt === 'function' ? prompt('백업해 둔 매매일지 JSON을 붙여넣으세요') : null;
+      if (!raw) return;
+      try {
+        const arr = JSON.parse(raw);
+        if (!Array.isArray(arr)) throw new Error();
+        saveJournal(arr);
+        showToast(`${arr.length}건의 매매일지를 복원했어요`);
+        renderScalpCard();
+        renderDrawer();
+      } catch (_) {
+        showToast('올바른 JSON 형식이 아닙니다');
+      }
     });
   } else if (state.drawerTab === 'sim') {
     if (state.tab === 'STOCK' || !state.currentForecast || !state.currentForecast.modelRef) {
@@ -1872,7 +2028,9 @@ async function fetchStockData(query, silent = false) {
       peerAvgPct: computeLatestPeerAvgPct(data.peers),
       nxtPrePct: getNxtPrePct(data),
       perpPct: data.perp ? data.perp.pct : NaN,
-      investor: data.investor || null
+      investor: data.investor || null,
+      futFrgnEok: (data.isKr && state.liveInvestors.FUTURES && Number.isFinite(state.liveInvestors.FUTURES.frgn)) ? state.liveInvestors.FUTURES.frgn : NaN,
+      levEtf: data.leverageEtf || null
     });
     if (state.stockPhaseResult) recordScoreDelta(data.symbol + ':' + state.stockPhaseResult.phase, (Number.isFinite(state.stockPhaseResult.dirScore) ? state.stockPhaseResult.dirScore : Math.round((state.stockPhaseResult.p - 0.5) * 200)));
   } catch (err) {
@@ -1945,7 +2103,9 @@ function bindEvents() {
         peerAvgPct: computeLatestPeerAvgPct(data.peers),
         nxtPrePct: getNxtPrePct(data),
         perpPct: data.perp ? data.perp.pct : NaN,
-        investor: data.investor || null
+        investor: data.investor || null,
+        futFrgnEok: (data.isKr && state.liveInvestors.FUTURES && Number.isFinite(state.liveInvestors.FUTURES.frgn)) ? state.liveInvestors.FUTURES.frgn : NaN,
+        levEtf: data.leverageEtf || null
       });
     } else {
       computeActiveIndex();

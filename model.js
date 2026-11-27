@@ -1245,6 +1245,21 @@ function computePhaseForecast(baseP, opts) {
         p = sigmoid(Math.log(pc / (1 - pc)) + flowLogit);
       }
     }
+    // 코스피200 외국인 선물 수급 (지수 및 국내 대형주 선행 반영)
+    if (!isUs && Number.isFinite(o.futFrgnEok) && Math.abs(o.futFrgnEok) >= 300) {
+      const futWeight = o.isStock ? 0.24 : 0.38;
+      const futLogit = Math.max(-0.42, Math.min(0.42, (o.futFrgnEok / 3000) * futWeight));
+      const pc = Math.max(0.03, Math.min(0.97, p));
+      p = sigmoid(Math.log(pc / (1 - pc)) + futLogit);
+      factors.push({ label: '외국인 코스피200 선물', val: Math.round(o.futFrgnEok), unit: '억' });
+    }
+    // 삼성전자·SK하이닉스 단일종목 2X 레버리지 괴리/장막판 리밸런싱 압력 보조 점수
+    if (o.isStock && o.levEtf && Number.isFinite(o.levEtf.scoreDelta) && o.levEtf.scoreDelta !== 0) {
+      const levLogit = Math.max(-0.20, Math.min(0.20, o.levEtf.scoreDelta));
+      const pc = Math.max(0.03, Math.min(0.97, p));
+      p = sigmoid(Math.log(pc / (1 - pc)) + levLogit);
+      factors.push({ label: o.levEtf.name || '단일종목 2X ETF', val: o.levEtf.disparityPct, unit: '%괴리' });
+    }
   }
 
   p = Math.max(0.04, Math.min(0.96, p));
