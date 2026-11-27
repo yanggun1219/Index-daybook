@@ -52,6 +52,9 @@ const state = {
   stockPhaseResult: null,
   scoreDeltas: {},
   lastTrendHist: {},
+  aiBriefLoading: false,
+  aiBriefCache: {},
+  aiBriefError: '',
   autoLive: safeRead('daybook_v9_autolive', '1') === '1',
   lastTickPrice: null
 };
@@ -994,6 +997,88 @@ function deleteJournalEntry(id) {
   if (state.drawerOpen && state.drawerTab === 'journal') renderDrawer();
 }
 
+
+function formatBriefHtml(rawText) {
+  const esc = String(rawText || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  return esc
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+    .replace(/\n/g, '<br>');
+}
+
+async function requestAiBrief() {
+  if (!state.workerUrl) {
+    showToast('하단 설정에서 서버 주소를 먼저 입력해 주세요');
+    return;
+  }
+  if (state.aiBriefLoading) return;
+  const snap = getCurrentAssetSnapshot();
+  const chk = evaluateScalpCheck(Date.now());
+  const rg = getActiveRegime();
+  const isStock = state.tab === 'STOCK';
+  const sp = isStock ? state.stockPayload : null;
+  const pr = isStock ? state.stockPhaseResult : state.currentPhaseResult;
+  const fut = state.marketsData.FUTURES || {};
+
+  const newsItems = (isStock && sp && Array.isArray(sp.news) && sp.news.length)
+    ? sp.news
+    : ((state.marketsData.NEWS && Array.isArray(state.marketsData.NEWS.items)) ? state.marketsData.NEWS.items : []);
+
+  const ctxParts = [];
+  if (Number.isFinite(fut.NQ_pct)) ctxParts.push(`나스닥선물 ${fmtSigned(fut.NQ_pct, '%')}`);
+  if (Number.isFinite(fut.EWY_pct)) ctxParts.push(`EWY ${fmtSigned(fut.EWY_pct, '%')}`);
+  if (Number.isFinite(fut.K200_pct)) ctxParts.push(`코스피200선물 ${fmtSigned(fut.K200_pct, '%')}`);
+  if (!isStock && state.liveInvestors[state.tab]) {
+    const iv = state.liveInvestors[state.tab];
+    ctxParts.push(`외국인 ${fmtEok(iv.frgn)}, 기관 ${fmtEok(iv.orgn)}, 개인 ${fmtEok(iv.prsn)}`);
+  } else if (isStock && sp && sp.investor) {
+    ctxParts.push(`종목 외인 ${fmtQty(sp.investor.frgnQty)}, 기관 ${fmtQty(sp.investor.orgnQty)}`);
+  }
+
+  const body = {
+    symbol: snap.key,
+    name: snap.name,
+    regime: rg ? rg.label : '-',
+    ret20: rg ? rg.ret20 : '-',
+    priceStr: (document.getElementById('hero-price')?.textContent || '-'),
+    retStr: (document.getElementById('hero-ret')?.textContent || '-'),
+    openLine: (document.getElementById('hero-open-line')?.textContent || '-'),
+    phaseLabel: (document.getElementById('phase-pill')?.textContent || '-'),
+    dirLabel: pr ? (pr.dir === 'up' ? '상승 우위' : pr.dir === 'down' ? '하락 우위' : '관망') : '-',
+    score: chk ? chk.score : 0,
+    expectedPrice: (document.getElementById('forecast-score')?.textContent || '-'),
+    verdict: chk ? `${chk.verdict} (${chk.passCount}/3)` : '-',
+    checks: chk ? chk.checks.map(c => `${c.title}: ${c.val}`) : [],
+    contextLine: ctxParts.join(' · ') || '수급/선물 대기',
+    news: newsItems.slice(0, 7).map(it => ({ title: it.title, source: it.source }))
+  };
+
+  state.aiBriefLoading = true;
+  state.aiBriefError = '';
+  renderScalpCard();
+  try {
+    const res = await fetch(`${state.workerUrl.replace(/\/+$/, '')}/ai-brief`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(j.error || `오류 (${res.status})`);
+    state.aiBriefCache[snap.key] = {
+      brief: j.brief,
+      model: j.model || 'Gemini',
+      updatedKst: j.updatedKst || ''
+    };
+  } catch (err) {
+    state.aiBriefError = err.message || 'AI 브리핑 요청 실패';
+  } finally {
+    state.aiBriefLoading = false;
+    renderScalpCard();
+  }
+}
+
 function renderScalpCard() {
   const box = document.getElementById('scalp-card');
   if (!box) return;
@@ -1044,15 +1129,35 @@ function renderScalpCard() {
         </div>`;
       }).join('')}
     </div>
-    <div class="mt-2.5 flex items-center justify-between gap-1.5">
+    <div class="mt-2.5 flex items-center justify-between gap-1.5 flex-wrap">
       <div class="flex items-center gap-1.5">
+        <button id="btn-ai-brief" class="px-2.5 py-1.5 rounded-xl text-[11px] font-extrabold transition-colors" style="background-color:${state.dark ? '#312E81' : '#EEF2FF'}; color:${state.dark ? '#C7D2FE' : '#4338CA'};">${state.aiBriefLoading ? '✨ 분석 중...' : '✨ AI 브리핑'}</button>
         <button id="btn-scalp-buy" class="px-2.5 py-1.5 rounded-xl text-[11px] font-extrabold transition-colors" style="background-color:${c.up}1A; color:${c.up};">매수 기록</button>
         <button id="btn-scalp-sell" class="px-2.5 py-1.5 rounded-xl text-[11px] font-extrabold transition-colors" style="background-color:${c.down}1A; color:${c.down};">매도 기록</button>
       </div>
       <button id="btn-open-journal" class="px-2.5 py-1.5 rounded-xl text-[11px] font-bold transition-colors" style="${tileStyle} color:${c.text};">기록 ${list.length}건 · ${winStr} ▸</button>
     </div>
+    ${(() => {
+      const snapKey = getCurrentAssetSnapshot().key;
+      const cached = state.aiBriefCache[snapKey];
+      if (state.aiBriefError) {
+        return `<div class="mt-2.5 p-3 rounded-2xl text-[11px] font-semibold leading-relaxed" style="${tileStyle} color:${c.down};">${state.aiBriefError}</div>`;
+      }
+      if (cached && cached.brief) {
+        return `<div class="mt-2.5 p-3 rounded-2xl text-[11.5px] leading-relaxed" style="background-color:${state.dark ? 'rgba(99,102,241,0.10)' : '#F8FAFC'}; border:1px solid ${c.border};">
+          <div class="flex items-center justify-between gap-2 mb-1.5">
+            <span class="text-[10px] font-black" style="color:${state.dark ? '#A5B4FC' : '#4338CA'};">✨ Gemini 시황·진입 브리핑</span>
+            <span class="text-[10px] font-bold opacity-55 tabular">${cached.updatedKst ? cached.updatedKst.slice(11, 16) : ''}</span>
+          </div>
+          <div class="opacity-90 break-keep">${formatBriefHtml(cached.brief)}</div>
+        </div>`;
+      }
+      return '';
+    })()}
   `;
 
+  const bAi = document.getElementById('btn-ai-brief');
+  if (bAi) bAi.onclick = () => requestAiBrief();
   const bBuy = document.getElementById('btn-scalp-buy');
   const bSell = document.getElementById('btn-scalp-sell');
   const bOpen = document.getElementById('btn-open-journal');
