@@ -37,6 +37,31 @@ function toggleFavStock(name) {
     saveFavStocks(favs);
     showToast(`관심종목에 '${target}' 추가`);
   }
+  if (loadFavStocks().length < 2) state.favReorderMode = false;
+  renderAll();
+}
+
+function moveFavStock(name, delta) {
+  const favs = loadFavStocks();
+  const idx = favs.indexOf(name);
+  if (idx < 0) return;
+  const next = idx + delta;
+  if (next < 0 || next >= favs.length) return;
+  const [item] = favs.splice(idx, 1);
+  favs.splice(next, 0, item);
+  saveFavStocks(favs);
+  renderAll();
+}
+
+function reorderFavStock(fromName, toName) {
+  if (!fromName || !toName || fromName === toName) return;
+  const favs = loadFavStocks();
+  const fromIdx = favs.indexOf(fromName);
+  const toIdx = favs.indexOf(toName);
+  if (fromIdx < 0 || toIdx < 0) return;
+  const [item] = favs.splice(fromIdx, 1);
+  favs.splice(toIdx, 0, item);
+  saveFavStocks(favs);
   renderAll();
 }
 
@@ -94,6 +119,7 @@ const state = {
   aiBriefCache: {},
   aiBriefError: '',
   quickEntrySide: null,
+  favReorderMode: false,
   autoLive: safeRead('daybook_v9_autolive', '1') === '1',
   lastTickPrice: null
 };
@@ -840,28 +866,28 @@ function classifyMarketRegime(rows) {
 
   let label = '횡보장';
   let tone = 'flat';
-  let guide = '박스권 짧은 단타 위주';
+  let guide = '박스권 짧은 단타';
 
   if (cur > ma20 && ma20 > ma60 && ret20 >= 3) {
     label = '강세장';
     tone = 'up';
-    guide = '비중 확대 · 추세 보유 유리';
+    guide = '비중 늘려 추세 타기';
   } else if ((cur < ma20 && ma20 < ma60 && ret20 <= -5) || (cur < ma60 && dd60 <= -10)) {
     label = '하락장';
     tone = 'down';
-    guide = '현금 방어 · 짧은 단타/인버스 · 종베 주의';
+    guide = '짧게 치고 빠지기 (종베 주의)';
   } else if (Math.abs(maGap) <= 2.5 && Math.abs(ret20) < 3.5 && Math.abs(dist60) <= 3.0) {
     label = '횡보장';
     tone = 'flat';
-    guide = '박스권 짧은 단타 위주';
+    guide = '박스권 짧은 단타';
   } else if (cur >= ma60 && (ma20 >= ma60 || ret20 > 0)) {
     label = '완만 상승';
     tone = 'up_soft';
-    guide = '눌림목 분할 접근 · 보유';
+    guide = '눌릴 때 나눠 담기';
   } else {
     label = '약세장';
     tone = 'down_soft';
-    guide = '비중 축소 · 짧은 단타 대응';
+    guide = '비중 줄여 짧게 대응';
   }
 
   return {
@@ -957,8 +983,9 @@ function evaluateScalpCheck(nowMs) {
   const effBuyMin = (rgNow && rgNow.tone === 'down') ? Math.max(minScore, 45) : (rgNow && rgNow.tone === 'up' ? Math.max(28, minScore - 5) : minScore);
   const effMin = dir === 'up' ? effBuyMin : minScore;
   const c1Pass = dir === 'up' ? (sc >= effBuyMin) : (dir === 'down' ? (absSc >= minScore) : false);
-  const c1RuleTxt = (dir === 'up' && rgNow && rgNow.tone === 'down') ? `하락장 +${effBuyMin}` : `기준 ±${effMin}`;
-  const c1Val = `${sc > 0 ? '+' : ''}${sc}점 (${c1RuleTxt})`;
+  const c1Val = c1Pass
+    ? `충분함 (${sc > 0 ? '+' : ''}${sc}점)`
+    : (dir === 'flat' ? `방향 약함 (${sc > 0 ? '+' : ''}${sc}점)` : `아직 약함 (${sc > 0 ? '+' : ''}${sc}/${dir === 'up' ? '+' + effBuyMin : '-' + minScore})`);
 
   // 2) 30분 흐름 / 선행지표 일치 체크
   const sKey = (isStock && sp ? sp.symbol : state.tab) + ':' + pr.phase;
@@ -968,17 +995,17 @@ function evaluateScalpCheck(nowMs) {
   let c2Val = '데이터 누적 중';
 
   if (pr.phase === 'intraday') {
-    c2Title = '30분 점수 흐름';
+    c2Title = '최근 분위기';
     if (hist.length >= 2) {
       const diff = hist[hist.length - 1] - hist[0];
       c2Pass = (dir === 'up' && diff >= 0) || (dir === 'down' && diff <= 0);
-      c2Val = diff > 3 ? '상승 힘 강화' : diff < -3 ? '하락 힘 강화' : '방향 유지';
+      c2Val = diff > 3 ? '점점 강해짐' : diff < -3 ? '점점 약해짐' : '분위기 유지';
     } else {
       c2Pass = absSc >= minScore;
       c2Val = '초기 구간';
     }
   } else {
-    c2Title = (windowCode === 'nxt_after_bet' && mins >= 1080) ? '미 선물·프리장 일치' : '야간 선행지표 일치';
+    c2Title = '미국·선물 분위기';
     const fut = state.marketsData.FUTURES || {};
     const leadVals = [];
     if (Number.isFinite(fut.NQ_pct)) leadVals.push(fut.NQ_pct);
@@ -990,7 +1017,7 @@ function evaluateScalpCheck(nowMs) {
     if (leadVals.length) {
       const avgLead = leadVals.reduce((x, y) => x + y, 0) / leadVals.length;
       c2Pass = (dir === 'up' && avgLead > 0.15) || (dir === 'down' && avgLead < -0.15);
-      c2Val = `선행 평균 ${fmtSigned(avgLead, '%')}`;
+      c2Val = `${avgLead > 0.15 ? '좋음' : avgLead < -0.15 ? '약함' : '보합'} (${fmtSigned(avgLead, '%')})`;
     } else {
       c2Val = '선물 대기';
     }
@@ -998,29 +1025,29 @@ function evaluateScalpCheck(nowMs) {
 
   // 3) 수급 일치 (장중) 또는 예상 밴드 참고 손절선 (장전/종가베팅)
   let c3Pass = false;
-  let c3Title = '외국인·기관 수급';
+  let c3Title = '외인·기관';
   let c3Val = '집계 대기';
 
   if (pr.phase === 'intraday' && isKr) {
     if (isStock && sp && sp.investor) {
       const net = (Number(sp.investor.frgnQty) || 0) + (Number(sp.investor.orgnQty) || 0);
       c3Pass = (dir === 'up' && net > 0) || (dir === 'down' && net < 0);
-      c3Val = net > 0 ? '외인·기관 순매수' : net < 0 ? '외인·기관 순매도' : '보합';
+      c3Val = net > 0 ? '같이 사는 중' : net < 0 ? '같이 파는 중' : '눈치 보기';
     } else if (!isStock && state.liveInvestors[state.tab]) {
       const inv = state.liveInvestors[state.tab];
       const net = (Number(inv.frgn) || 0) + (Number(inv.orgn) || 0);
       c3Pass = (dir === 'up' && net > 0) || (dir === 'down' && net < 0);
-      c3Val = `합산 ${fmtEok(net)}`;
+      c3Val = `${net > 0 ? '사는 중' : net < 0 ? '파는 중' : '보합'} (${fmtEok(net)})`;
     }
   } else {
-    c3Title = '예상 밴드 손절 기준';
+    c3Title = '이 가격 깨면 주의';
     const snap = getCurrentAssetSnapshot();
     const candles = getCandlesForView().slice(-15);
     const fc = buildForecastCandle(candles, NaN, pr.phase === 'intraday', snap.price);
     if (fc && Number.isFinite(fc.low) && Number.isFinite(fc.high)) {
       const stopPrice = dir === 'down' ? fc.high : fc.low;
       c3Pass = c1Pass && dir !== 'flat';
-      c3Val = `${dir === 'down' ? '상단' : '하단'} ${snap.pfx}${fmtNum(stopPrice, snap.dec)}${snap.ufx}`;
+      c3Val = `${snap.pfx}${fmtNum(stopPrice, snap.dec)}${snap.ufx}`;
     } else {
       c3Val = '밴드 계산 중';
     }
@@ -1060,27 +1087,42 @@ function evaluateScalpCheck(nowMs) {
   }
 
   const passCount = (c1Pass ? 1 : 0) + (c2Pass ? 1 : 0) + (c3Pass ? 1 : 0);
-  let verdict = '관망 (조건 미달)';
+  let verdict = '지금은 쉬어가는 구간이에요';
+  let verdictSub = `조건 ${passCount}/3 충족 · 확실한 신호 대기`;
   let verdictTone = 'flat';
   if (posAlert) {
-    verdict = posAlert;
+    verdict = posAlert.includes('익절')
+      ? `들고 있는 물량, 수익 챙길 타이밍 (${fmtSigned(openPos.evalPct, '%')})`
+      : posAlert.includes('손절')
+        ? `들고 있는 물량, 손절 고민할 자리 (${fmtSigned(openPos.evalPct, '%')})`
+        : '들고 있는 물량, 정리 고민할 자리';
+    verdictSub = '흐름이 반대로 꺾이거나 주의 가격을 이탈했어요';
     verdictTone = posAlertTone;
   } else if (windowCode === 'open_noise' && passCount < 3) {
-    verdict = '09:15 이후 진입 권장';
+    verdict = '개장 초반이라 09:15까지 대기해요';
+    verdictSub = '장 시작 직후 흔들림 구간';
     verdictTone = 'flat';
   } else if (c1Pass && passCount >= 2 && dir === 'up') {
     if (chaseRisk) {
-      verdict = `눌림목 대기 (여력 +${upsideLeftPct.toFixed(2)}%)`;
+      verdict = '이미 많이 올라서 눌림목 대기해요';
+      verdictSub = `예상가까지 남은 여력 +${upsideLeftPct.toFixed(2)}% (추격 주의)`;
       verdictTone = 'flat';
     } else {
-      verdict = windowCode === 'nxt_pre' ? '상승 유지 · 홀딩 우세' : (passCount === 3 ? '강한 매수 신호' : '분할 매수 우세');
+      verdict = windowCode === 'nxt_pre'
+        ? '상승 흐름 유지 중 · 들고 가볼 만해요'
+        : (passCount === 3 ? '매수 타이밍 좋아요' : '조금씩 나눠 사볼 만해요');
+      verdictSub = `핵심 조건 ${passCount}/3 충족 · ${windowLabel}`;
       verdictTone = 'up';
     }
   } else if (c1Pass && passCount >= 2 && dir === 'down') {
-    verdict = windowCode === 'nxt_pre' ? '하락 반전 · 프리장 정리 검토' : (passCount === 3 ? '강한 매도·인버스' : '매도·인버스 우세');
+    verdict = windowCode === 'nxt_pre'
+      ? '분위기가 꺾였어요 · 프리장 정리 검토'
+      : (passCount === 3 ? '하락 압력이 강해요 (매수 주의)' : '약세 흐름 · 보수적으로 대응해요');
+    verdictSub = `하락 조건 ${passCount}/3 충족 · ${windowLabel}`;
     verdictTone = 'down';
   } else if (dir === 'up' && !c1Pass && rgNow && rgNow.tone === 'down' && sc >= minScore) {
-    verdict = `하락장 관망 (+${effBuyMin}점↑ 필요)`;
+    verdict = '조금 더 기다려요';
+    verdictSub = `하락장이라 +${effBuyMin}점 넘을 때만 추천 (현재 +${sc}점)`;
     verdictTone = 'flat';
   }
 
@@ -1089,10 +1131,11 @@ function evaluateScalpCheck(nowMs) {
     windowLabel,
     strategyTag,
     verdict,
+    verdictSub,
     verdictTone,
     passCount,
     checks: [
-      { title: '방향 점수 강도', val: c1Val, pass: c1Pass },
+      { title: dir === 'down' ? '하락 힘' : '상승 힘', val: c1Val, pass: c1Pass },
       { title: c2Title, val: c2Val, pass: c2Pass },
       { title: c3Title, val: c3Val, pass: c3Pass }
     ],
@@ -1290,12 +1333,16 @@ function renderScalpCard() {
   const winStr = closed.length ? `승률 ${Math.round((wins / closed.length) * 100)}%` : '기록 보기';
 
   box.innerHTML = `
-    <div class="flex items-center justify-between gap-2 mb-2.5">
-      <div class="min-w-0">
-        <div class="text-xs font-extrabold">단타 진입 체크</div>
-        <div class="text-[10px] font-bold opacity-60 truncate mt-0.5">${chk.windowLabel}</div>
+    <div class="mb-2.5">
+      <div class="flex items-center justify-between gap-2">
+        <span class="text-[10px] font-extrabold opacity-55">단타 한눈에 보기</span>
+        <span class="text-[10px] font-black px-2 py-0.5 rounded-full" style="background-color:${vCol}1A; color:${vCol};">${chk.passCount}/3 충족</span>
       </div>
-      <span class="shrink-0 px-2.5 py-1 rounded-xl text-[11px] font-black" style="background-color:${vCol}1A; color:${vCol};">${chk.verdict} (${chk.passCount}/3)</span>
+      <div class="mt-1 flex items-center gap-2">
+        <span class="w-2.5 h-2.5 rounded-full shrink-0" style="background-color:${vCol};"></span>
+        <div class="text-[15px] font-black tracking-tight leading-snug break-keep" style="color:${chk.verdictTone === 'flat' ? c.text : vCol};">${chk.verdict}</div>
+      </div>
+      <div class="mt-0.5 text-[11px] font-semibold opacity-65 pl-4 break-keep">${chk.verdictSub || chk.windowLabel}</div>
     </div>
     ${(() => {
       const rg = getActiveRegime();
@@ -1775,15 +1822,30 @@ function renderAll() {
     }
     const mergedPresets = [...favs, ...STOCK_PRESETS.filter(n => !favs.includes(n))];
     const presetsEl = document.getElementById('stock-presets');
-    presetsEl.innerHTML = mergedPresets.map(name => {
+    const inReorder = Boolean(state.favReorderMode && favs.length >= 2);
+    presetsEl.className = inReorder
+      ? 'flex flex-wrap items-center gap-1.5 pb-0.5'
+      : 'flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-0.5';
+    const reorderToggleHtml = favs.length >= 2
+      ? `<button id="btn-fav-reorder" type="button" class="px-2.5 py-1.5 rounded-full text-[10.5px] font-black shrink-0 transition-colors" style="background-color:${inReorder ? '#F59E0B' : c.tile}; color:${inReorder ? '#FFFFFF' : c.text}; border:1px solid ${inReorder ? '#F59E0B' : c.border};">${inReorder ? '✓ 완료' : '↕ 순서'}</button>`
+      : '';
+    const chipsHtml = (inReorder ? favs : mergedPresets).map((name, idx) => {
       const isFav = favs.includes(name);
-      const on = state.stockQuery === name || curLabel === name;
+      const on = !inReorder && (state.stockQuery === name || curLabel === name);
       const bg = on ? (d ? '#F8FAFC' : '#111827') : (isFav ? (d ? 'rgba(245,158,11,0.14)' : '#FFFBEB') : c.card);
       const col = on ? (d ? '#111827' : '#FFFFFF') : (isFav ? (d ? '#FCD34D' : '#B45309') : c.muted);
-      const bd = isFav && !on ? 'rgba(245,158,11,0.38)' : c.border;
+      const bd = isFav && !on ? 'rgba(245,158,11,0.42)' : c.border;
+      if (inReorder) {
+        return `<div data-fav-drag="${name}" class="fav-drag-chip inline-flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[11px] font-extrabold shrink-0 select-none" style="background-color:${bg}; color:${col}; border:1.5px dashed ${bd}; touch-action:none; cursor:grab;">
+          <span data-fav-mv="${name}" data-dir="-1" class="px-1 opacity-75" style="${idx === 0 ? 'opacity:0.25;' : ''}">◀</span>
+          <span>⋮⋮ ★ ${name}</span>
+          <span data-fav-mv="${name}" data-dir="1" class="px-1 opacity-75" style="${idx === favs.length - 1 ? 'opacity:0.25;' : ''}">▶</span>
+        </div>`;
+      }
       const rmBtn = isFav ? `<span data-fav-rm="${name}" class="ml-1 opacity-65 hover:opacity-100" style="padding:0 2px;">×</span>` : '';
       return `<button data-preset="${name}" class="preset-btn inline-flex items-center px-3 py-1.5 rounded-full text-[11px] font-extrabold shrink-0 transition-colors" style="background-color:${bg}; color:${col}; border:1px solid ${bd};">${isFav ? '★ ' : ''}${name}${rmBtn}</button>`;
     }).join('');
+    presetsEl.innerHTML = reorderToggleHtml + chipsHtml;
 
   }
 
@@ -2302,7 +2364,47 @@ function bindEvents() {
 
   const presetsEl = document.getElementById('stock-presets');
   if (presetsEl) {
+    let draggingName = null;
+    presetsEl.addEventListener('pointerdown', e => {
+      if (!state.favReorderMode) return;
+      if (e.target && e.target.closest && e.target.closest('[data-fav-mv]')) return;
+      const chip = e.target && e.target.closest ? e.target.closest('[data-fav-drag]') : null;
+      if (!chip) return;
+      draggingName = chip.dataset.favDrag;
+      chip.style.opacity = '0.55';
+      if (chip.setPointerCapture && e.pointerId !== undefined) {
+        try { chip.setPointerCapture(e.pointerId); } catch (_) {}
+      }
+    });
+    presetsEl.addEventListener('pointerup', e => {
+      if (!draggingName) return;
+      const srcName = draggingName;
+      draggingName = null;
+      const elAt = typeof document.elementFromPoint === 'function' ? document.elementFromPoint(e.clientX, e.clientY) : null;
+      const targetChip = elAt && elAt.closest ? elAt.closest('[data-fav-drag]') : null;
+      if (targetChip && targetChip.dataset && targetChip.dataset.favDrag && targetChip.dataset.favDrag !== srcName) {
+        reorderFavStock(srcName, targetChip.dataset.favDrag);
+      } else {
+        renderAll();
+      }
+    });
+    presetsEl.addEventListener('pointercancel', () => {
+      if (draggingName) { draggingName = null; renderAll(); }
+    });
     presetsEl.addEventListener('click', e => {
+      const rToggle = e.target && e.target.closest ? e.target.closest('#btn-fav-reorder') : null;
+      if (rToggle) {
+        state.favReorderMode = !state.favReorderMode;
+        if (state.favReorderMode) showToast('칩을 끌어 원하는 자리에 놓거나 ◀ ▶ 로 이동하세요');
+        renderAll();
+        return;
+      }
+      const mv = e.target && e.target.closest ? e.target.closest('[data-fav-mv]') : null;
+      if (mv && mv.dataset && mv.dataset.favMv) {
+        e.stopPropagation();
+        moveFavStock(mv.dataset.favMv, Number(mv.dataset.dir || 0));
+        return;
+      }
       const rm = e.target && e.target.closest ? e.target.closest('[data-fav-rm]') : null;
       if (rm && rm.dataset && rm.dataset.favRm) {
         e.stopPropagation();
